@@ -261,6 +261,11 @@ cp "$punch_source/broker_binding.go" "$work_dir/source/experimental/libbox/openr
 cp "$punch_source/failure_binding.go" "$work_dir/source/experimental/libbox/openrung_failure.go"
 cp "$punch_source/singbox_binding.go" "$work_dir/source/experimental/libbox/openrung_singbox.go"
 cp "$punch_source/telemetry_binding.go" "$work_dir/source/experimental/libbox/openrung_telemetry.go"
+# The engine binding graft (file list, build-constraint guard, app-version
+# generator) is shared with the other platform's release script.
+bash "$repo_root/scripts/graft-engine-binding.sh" "$punch_source" \
+  "$work_dir/source/experimental/libbox" "$repo_root/package.json"
+
 mkdir -p "$work_dir/source/experimental/libbox/internal/openrungpunch"
 for source_file in "$punch_source/internal/openrungpunch/"*.go; do
   case "$source_file" in
@@ -333,6 +338,9 @@ done
   # Build one AAR with all four React Native release ABIs: armeabi-v7a,
   # arm64-v8a, x86, and x86_64. The previous arm64-only target was too narrow
   # for the app's declared reactNativeArchitectures set.
+  # Match upstream build_libbox: oomprofile uses runtime linknames on Linux.
+  GOMODCACHE="$module_cache" GOWORK=off \
+    go test -race -ldflags=-checklinkname=0 -tags with_gvisor,with_quic,with_clash_api ./experimental/libbox -run TestOpenRungLibbox
   GOMODCACHE="$module_cache" GOWORK=off go run ./cmd/internal/build_libbox \
     -target android \
     -platform android
@@ -346,6 +354,8 @@ import zipfile
 
 aar_path, classes_path = sys.argv[1:]
 required_classes = [
+    "io/nekohasekai/libbox/OpenRungEngine.class",
+    "io/nekohasekai/libbox/OpenRungEngineListener.class",
     "io/nekohasekai/libbox/OpenRungBrokerOperation.class",
     "io/nekohasekai/libbox/OpenRungBrokerResult.class",
     "io/nekohasekai/libbox/OpenRungBrokerRelayResult.class",
@@ -383,6 +393,8 @@ CHECK_AAR
 javap_output="$(
   "$JAVA_HOME/bin/javap" -classpath "$classes_jar" \
     io.nekohasekai.libbox.Libbox \
+    io.nekohasekai.libbox.OpenRungEngine \
+    io.nekohasekai.libbox.OpenRungEngineListener \
     io.nekohasekai.libbox.OpenRungBrokerOperation \
     io.nekohasekai.libbox.OpenRungBrokerResult \
     io.nekohasekai.libbox.OpenRungBrokerRelayResult \
@@ -398,7 +410,18 @@ javap_output="$(
 # an unconsumed binding method here gates releases on surface nothing uses — `downloadSpeedTest`
 # was pinned that way and removed; only `runSpeedTest` (brokerapi's warmup + measurement flow) has
 # a caller. Add a symbol here when you add its call site, not before.
+# B1's engine API is linked by the native ABI smoke tests before B2/B3 cutover.
 for generated_symbol in \
+  'newOpenRungEngineForAndroid(java.lang.String, io.nekohasekai.libbox.PlatformInterface, io.nekohasekai.libbox.OpenRungWSSProtector, io.nekohasekai.libbox.OpenRungEngineListener) throws java.lang.Exception;' \
+  'newOpenRungEngineForIOS(java.lang.String, io.nekohasekai.libbox.PlatformInterface, io.nekohasekai.libbox.OpenRungEngineListener) throws java.lang.Exception;' \
+  'start(java.lang.String, java.lang.String, java.lang.String) throws java.lang.Exception;' \
+  'disconnect() throws java.lang.Exception;' \
+  'stop(long) throws java.lang.Exception;' \
+  'pause();' \
+  'resume();' \
+  'networkChanged(boolean, java.lang.String, java.lang.String) throws java.lang.Exception;' \
+  'stateJSON();' \
+  'onEvent(java.lang.String);' \
   'newOpenRungBrokerOperationForAndroid(java.lang.String, java.lang.String);' \
   'newOpenRungBrokerOperationForIOS(java.lang.String, java.lang.String);' \
   'newOpenRungBrokerOperationForReactNative(java.lang.String, java.lang.String);' \

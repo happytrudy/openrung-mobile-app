@@ -275,6 +275,11 @@ cp "$binding_source/singbox_binding.go" \
   "$work_dir/source/experimental/libbox/openrung_singbox.go"
 cp "$binding_source/telemetry_binding.go" \
   "$work_dir/source/experimental/libbox/openrung_telemetry.go"
+# The engine binding graft (file list, build-constraint guard, app-version
+# generator) is shared with the other platform's release script.
+bash "$repo_root/scripts/graft-engine-binding.sh" "$binding_source" \
+  "$work_dir/source/experimental/libbox" "$repo_root/package.json"
+
 mkdir -p "$work_dir/source/experimental/libbox/internal/openrungpunch"
 for source_file in "$binding_source/internal/openrungpunch/"*.go; do
   case "$source_file" in
@@ -338,6 +343,9 @@ done
       "github.com/openrung/openrung/connectcore@$connectcore_version" \
       "github.com/openrung/openrung/punchcore@$punchcore_version" \
       "github.com/openrung/openrung/wsscore@$wsscore_version"
+  # Match upstream build_libbox: oomprofile uses runtime linknames on Linux.
+  GOMODCACHE="$module_cache" GOWORK=off \
+    go test -race -ldflags=-checklinkname=0 -tags with_gvisor,with_quic,with_clash_api ./experimental/libbox -run TestOpenRungLibbox
   GOMODCACHE="$module_cache" GOWORK=off \
     go run ./cmd/internal/build_libbox \
       -target apple \
@@ -384,6 +392,24 @@ for slice in ios-arm64 ios-arm64_x86_64-simulator; do
     echo "error: Apple build is missing the OpenRung iOS broker constructor in $slice" >&2
     exit 1
   fi
+  for engine_symbol in \
+    'LibboxNewOpenRungEngineForAndroid' \
+    'LibboxNewOpenRungEngineForIOS' \
+    '@protocol LibboxOpenRungEngine <NSObject>' \
+    '@protocol LibboxOpenRungEngineListener <NSObject>' \
+    ')start:' \
+    ')disconnect:' \
+    ')stop:' \
+    ')pause;' \
+    ')resume;' \
+    ')networkChanged:' \
+    ')stateJSON;' \
+    ')onEvent:'; do
+    if ! grep -Fq "$engine_symbol" "$header"; then
+      echo "error: Apple build is missing engine API in $slice: $engine_symbol" >&2
+      exit 1
+    fi
+  done
   for classifier_symbol in \
     'LibboxOpenRungClassifyFailure' \
     'LibboxOpenRungFailureDetail'; do
