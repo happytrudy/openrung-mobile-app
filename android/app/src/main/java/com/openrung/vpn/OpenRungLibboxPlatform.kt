@@ -9,7 +9,6 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.util.Log
-import com.openrung.telemetry.TelemetryManager
 import io.nekohasekai.libbox.ConnectionOwner
 import io.nekohasekai.libbox.InterfaceUpdateListener
 import io.nekohasekai.libbox.Libbox
@@ -32,13 +31,14 @@ import java.net.NetworkInterface as JavaNetworkInterface
 import io.nekohasekai.libbox.NetworkInterface as BoxNetworkInterface
 
 internal class OpenRungLibboxPlatform(
-    private val vpnService: VpnService,
-    private val onTunOpened: (ParcelFileDescriptor) -> Unit,
+    private val vpnService: OpenRungVpnService,
+    private val onTunOpened: (ParcelFileDescriptor, String) -> Unit,
+    private val recordConnection: (Int, List<String>, Int) -> Unit,
 ) : PlatformInterface {
     override fun usePlatformAutoDetectInterfaceControl(): Boolean = true
 
     override fun autoDetectInterfaceControl(fd: Int) {
-        vpnService.protect(fd)
+        check(vpnService.protect(fd)) { "android: socket protection refused" }
     }
 
     override fun openTun(options: TunOptions): Int {
@@ -91,7 +91,7 @@ internal class OpenRungLibboxPlatform(
         }
 
         val fd = builder.establish() ?: error("android: the VPN tunnel could not be established")
-        onTunOpened(fd)
+        try { onTunOpened(fd, Libbox.openRungTunName(fd.fd)) } catch (error: Throwable) { fd.close(); throw error }
         return fd.fd
     }
 
@@ -117,11 +117,7 @@ internal class OpenRungLibboxPlatform(
             if (uid == Process.INVALID_UID) return@runCatching ConnectionOwner()
 
             val packages = vpnService.packageManager.getPackagesForUid(uid)?.toList().orEmpty()
-            TelemetryManager.recordApplicationConnection(
-                uid = uid,
-                packages = packages,
-                destinationPort = destinationPort,
-            )
+            recordConnection(uid, packages, destinationPort)
             ConnectionOwner().apply {
                 userId = uid
                 userName = uid.toString()
@@ -148,11 +144,21 @@ internal class OpenRungLibboxPlatform(
 
     override fun systemCertificates(): StringIterator = EmptyStringIterator
 
+    // libbox starts/closes monitors on Go workers; observations arrive on the
+    // host queue. Serialize delivery and join it before retiring the listener.
+    private val monitorLock = Any()
+    private val interfaceListeners = LinkedHashMap<InterfaceUpdateListener, DefaultInterface?>()
     override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener?) {
-        updateDefaultInterface(listener)
+        synchronized(monitorLock) {
+            if (listener != null) { interfaceListeners[listener] = null; updateDefaultInterface(listener) }
+        }
     }
-
-    override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener?) = Unit
+    override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener?) {
+        synchronized(monitorLock) { interfaceListeners.remove(listener) }
+    }
+    fun refreshInterfaces() {
+        synchronized(monitorLock) { interfaceListeners.keys.toList().forEach(::updateDefaultInterface) }
+    }
 
     override fun startNeighborMonitor(listener: NeighborUpdateListener?) = Unit
 
@@ -202,36 +208,21 @@ internal class OpenRungLibboxPlatform(
             }
     }
 
-    private fun updateDefaultInterface(listener: InterfaceUpdateListener?) {
-        if (listener == null) return
+    private data class DefaultInterface(val name: String, val index: Int, val metered: Boolean, val constrained: Boolean)
 
-        val defaultNetwork = defaultAndroidNetwork()
-        val defaultInterface = defaultNetwork?.let { JavaNetworkInterface.getByName(it.interfaceName) }
-        if (defaultNetwork == null || defaultInterface == null || !defaultInterface.isUsableUnderlyingInterface()) {
-            Log.w(LOG_TAG, "no Android default network interface available for libbox")
-            listener.updateDefaultInterface("", -1, false, false)
-            return
+    private fun updateDefaultInterface(listener: InterfaceUpdateListener) {
+        val defaultNetwork = vpnService.physicalInterface()
+        val javaInterface = defaultNetwork?.let { JavaNetworkInterface.getByName(it.name) }
+        val next = if (defaultNetwork == null || javaInterface == null || !javaInterface.isUsableUnderlyingInterface()) {
+            DefaultInterface("", -1, false, false)
+        } else {
+            DefaultInterface(defaultNetwork.name, javaInterface.index, defaultNetwork.metered, defaultNetwork.constrained)
         }
-
-        Log.d(
-            LOG_TAG,
-            "default network for libbox: ${defaultNetwork.interfaceName}#${defaultInterface.index}",
-        )
-        listener.updateDefaultInterface(
-            defaultNetwork.interfaceName,
-            defaultInterface.index,
-            defaultNetwork.isMetered,
-            defaultNetwork.isConstrained,
-        )
-    }
-
-    private fun defaultAndroidNetwork(): AndroidNetworkInfo? {
-        val connectivityManager = vpnService.getSystemService(ConnectivityManager::class.java)
-        val activeNetwork = connectivityManager.activeNetwork
-        val networks = discoverAndroidNetworks(connectivityManager)
-        return networks.firstOrNull { it.network == activeNetwork }
-            ?: networks.firstOrNull { it.capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) }
-            ?: networks.firstOrNull()
+        // Go refreshes all interfaces and may reset every connection before its own
+        // dedup. Only notify it when the complete platform default tuple changes.
+        if (interfaceListeners[listener] == next) return
+        interfaceListeners[listener] = next
+        listener.updateDefaultInterface(next.name, next.index, next.metered, next.constrained)
     }
 
     private fun discoverAndroidNetworks(
