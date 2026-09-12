@@ -43,24 +43,6 @@ enum SharedConnectionState {
         mutate { $0.brokerURL = url }
     }
 
-    static func setRelayLabel(_ label: String?) {
-        mutate { $0.relayLabel = label }
-    }
-
-    static func recordRecent(_ node: RecentNode) {
-        mutate { snapshot in
-            snapshot.recentRegions = (
-                [node] +
-                    snapshot.recentRegions.filter { recent in
-                        recent.relayId != node.relayId &&
-                            !(recent.relayId == nil && recent.countryCode == node.countryCode)
-                    }
-            )
-                .prefix(AppConfig.maxRecents)
-                .map { $0 }
-        }
-    }
-
     static func clearError() {
         mutate { $0.lastError = nil }
     }
@@ -99,16 +81,7 @@ enum SharedConnectionState {
 
     static func applyEngineState(_ state: EngineStateProjection) {
         mutate { snapshot in
-            snapshot.status = state.status
-            snapshot.relayLabel = state.location
-            snapshot.relayName = state.relayName
-            snapshot.relayClass = state.relayClass
-            snapshot.lastError = state.error
-            if let node = state.recent {
-                snapshot.recentRegions = Array(([node] + snapshot.recentRegions.filter {
-                    $0.relayId != node.relayId && !($0.relayId == nil && $0.countryCode == node.countryCode)
-                }).prefix(AppConfig.maxRecents))
-            }
+            snapshot.applyEngineState(state)
         }
     }
 
@@ -159,6 +132,8 @@ enum SharedConnectionState {
         pendingSnapshot = nil
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         defaults?.set(data, forKey: key)
+        // Retire the pre-connectcore session shadow after publishing its replacement.
+        defaults?.removeObject(forKey: "telemetry_session")
         postDarwinNotification()
     }
 

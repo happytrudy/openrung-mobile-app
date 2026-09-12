@@ -711,8 +711,20 @@ phases, ENABLE_USER_SCRIPT_SANDBOXING=NO, current pbxproj settings), plus the
   ADR-001 vectors; no selectable native orchestrator remains.
 - `Shared/EngineStateProjection.swift` translates atomic Details into the
   existing app-group state: sanitized geographic location, display name, class,
-  matching recents and session ID. `TelemetrySessionStore` keeps its prior
-  storage format for the app's getIdentity call. Go opens the existing
+  matching recents and session ID. With current connectcore v0.6.1,
+  `RelayName == RelayID` represents an absent label; both adapters use the compact
+  ID fallback for connected state and matching recents. Swift's snapshot owns
+  the recents prepend/dedupe/cap rule, treating nil or blank relay IDs as legacy
+  country entries, matching Android. The engine session ID is persisted atomically
+  with status in `ConnectionStateSnapshot.sessionID`. The app mirrors this ID
+  in memory; `getIdentity()` refreshes OS tunnel status before returning it.
+  Cold launch starts with a nil ID. State reloads restore the persisted ID only
+  while the OS tunnel is active; disconnected/invalid OS status clears it even
+  after an extension crash or a delayed Darwin notification. Legacy snapshots
+  decode with a nil ID. Engine events supply it through connection/recovery;
+  local fresh starts, failure and disconnect clear the persisted ID. The obsolete
+  full `TelemetrySession` and separate store are removed; snapshot writes delete the retired
+  `telemetry_session` key. Go opens the existing
   app-group `outbox.json`, including its array-to-NDJSON migration, and retains
   the install UUID. Sessions include app version, platform and engine identity.
   There is no second Swift uploader or heartbeat loop.
