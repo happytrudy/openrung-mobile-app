@@ -1,0 +1,68 @@
+name: Build APK
+on:
+  workflow_dispatch:
+    inputs:
+      broker_url:
+        description: Broker URL used by the app
+        required: false
+        default: https://broker.openrung.org/
+      publish_release:
+        description: Publish APK to the current GitHub release
+        required: false
+        type: boolean
+        default: false
+permissions:
+  contents: write
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install Android NDKs
+        run: sdkmanager "ndk;29.0.14206865" "ndk;27.1.12297006"
+      - name: Install gomobile
+        run: |
+          go install github.com/sagernet/gomobile/cmd/gomobile@v0.1.12
+          go install github.com/sagernet/gomobile/cmd/gobind@v0.1.12
+      - run: npm ci
+      - name: Verify forked OpenRung modules
+        run: |
+          grep -q "github.com/openrung/openrung" android/punchbridge/go.mod
+      - name: Configure broker
+        env:
+          BROKER_URL: ${{ inputs.broker_url }}
+        run: |
+          python3 -c 'import pathlib,sys; u=sys.argv[1].strip(); assert u.startswith("https://"), "broker_url must use https://"; [p.write_text(p.read_text().replace("https://broker.openrung.org/", u.rstrip("/")+"/")) for p in map(pathlib.Path, ("src/config.ts", "android/app/src/main/java/com/openrung/config/AppConfig.kt", "ios/Shared/AppConfig.swift"))]' "$BROKER_URL"
+      - name: Prepare OpenRung fork source
+        run: git clone --depth 1 https://github.com/happytrudy/openrung.git /tmp/openrung-core
+      - name: Build libbox AAR with forked OpenRung core
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/29.0.14206865
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_HOME }}/ndk/29.0.14206865
+        run: OPENRUNG_CORE_SRC=/tmp/openrung-core bash android/build-libbox-release.sh
+      - name: Build signed or unsigned release APK
+        working-directory: android
+        run: ./gradlew assembleRelease
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openrung-release-apk
+          path: android/app/build/outputs/apk/release/*.apk
+      - name: Publish APK to current release
+        if: inputs.publish_release == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$(gh release view --json tagName --jq .tagName)" android/app/build/outputs/apk/release/*.apk --clobber
