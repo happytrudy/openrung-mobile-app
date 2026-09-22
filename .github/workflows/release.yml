@@ -170,7 +170,7 @@ jobs:
           echo "$certs" | grep -qi "CN=OpenRung" || { echo "::error::APK is not signed with the OpenRung upload key"; exit 1; }
 
       # Two names: a versioned asset for history, and a STABLE openrung-android.apk so that
-      # https://github.com/openrung/openrung-mobile-app/releases/latest/download/openrung-android.apk
+      # https://github.com/happytrudy/openrung-mobile-app/releases/latest/download/openrung-android.apk
       # is a permanent link that always serves the newest release (used by the openrung.org
       # download button, which lives in the separate openrung/openrung repo).
       - name: Stage APK assets

@@ -43,6 +43,10 @@ jobs:
         run: |
           grep -q "github.com/happytrudy/openrung" android/punchbridge/go.mod
           grep -R "github.com/happytrudy/openrung" android/punchbridge --include='*.go' >/dev/null
+          if grep -R "github.com/openrung/openrung/" android/punchbridge --include='*.go' --include='go.mod' >/dev/null; then
+            echo "old OpenRung module path remains in native sources" >&2
+            exit 1
+          fi
       - name: Configure broker
         env:
           BROKER_URL: ${{ inputs.broker_url }}

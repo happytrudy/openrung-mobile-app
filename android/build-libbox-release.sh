@@ -13,8 +13,8 @@ repo_root="$(cd "$script_dir/.." && pwd)"
 sing_box_version="$(tr -d '[:space:]' < "$repo_root/SINGBOX_VERSION")"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/openrung-sing-box-release.XXXXXX")"
 punch_source="$script_dir/punchbridge"
-# The fork currently has no brokerapi/connectcore/punchcore/wsscore tags.
-# Clone its repository and use local module replacements for this build.
+# The fork may not publish module tags. Clone its repository and use local
+# replacements while preserving the canonical Go module paths used by source.
 core_source="${OPENRUNG_CORE_SRC:-}"
 if [ -z "$core_source" ]; then
   core_source="$work_dir/openrung-core"
