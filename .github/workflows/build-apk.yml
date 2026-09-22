@@ -48,14 +48,13 @@ jobs:
           BROKER_URL: ${{ inputs.broker_url }}
         run: |
           python3 -c 'import pathlib,sys; u=sys.argv[1].strip(); assert u.startswith("https://"), "broker_url must use https://"; [p.write_text(p.read_text().replace("https://broker.openrung.org/", u.rstrip("/")+"/")) for p in map(pathlib.Path, ("src/config.ts", "android/app/src/main/java/com/openrung/config/AppConfig.kt", "ios/Shared/AppConfig.swift"))]' "$BROKER_URL"
-      - name: Resolve fork module checksums
-        working-directory: android/punchbridge
-        run: GOWORK=off GOFLAGS=-mod=mod go mod download
+      - name: Prepare OpenRung fork source
+        run: git clone --depth 1 https://github.com/happytrudy/openrung.git /tmp/openrung-core
       - name: Build libbox AAR with forked OpenRung core
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/29.0.14206865
           ANDROID_NDK_ROOT: ${{ env.ANDROID_HOME }}/ndk/29.0.14206865
-        run: bash android/build-libbox-release.sh
+        run: OPENRUNG_CORE_SRC=/tmp/openrung-core bash android/build-libbox-release.sh
       - name: Build signed or unsigned release APK
         working-directory: android
         run: ./gradlew assembleRelease

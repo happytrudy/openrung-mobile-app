@@ -13,6 +13,15 @@ repo_root="$(cd "$script_dir/.." && pwd)"
 sing_box_version="$(tr -d '[:space:]' < "$repo_root/SINGBOX_VERSION")"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/openrung-sing-box-release.XXXXXX")"
 punch_source="$script_dir/punchbridge"
+# The fork currently has no brokerapi/connectcore/punchcore/wsscore tags.
+# Clone its repository and use local module replacements for this build.
+core_source="${OPENRUNG_CORE_SRC:-}"
+if [ -z "$core_source" ]; then
+  core_source="$work_dir/openrung-core"
+  git clone --depth 1 "${OPENRUNG_CORE_REPO_URL:-https://github.com/happytrudy/openrung.git}" "$core_source"
+else
+  core_source="$(cd "$core_source" && pwd)"
+fi
 trap 'rm -rf "$work_dir"' EXIT
 
 export ANDROID_HOME="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
@@ -117,6 +126,18 @@ if [ -n "${PUNCHCORE_SRC:-}" ] || [ -n "${WSSCORE_SRC:-}" ] || [ -n "${BROKERAPI
 fi
 
 echo "Testing the OpenRung native bindings"
+# Test against the same local fork source that the graft build uses.
+test_workspace="$work_dir/openrung-core-test.work"
+{
+  echo "go 1.25.0"
+  echo
+  echo "use $punch_source"
+  echo
+  echo "replace github.com/happytrudy/openrung/brokerapi => $core_source/brokerapi"
+  echo "replace github.com/happytrudy/openrung/connectcore => $core_source/connectcore"
+  echo "replace github.com/happytrudy/openrung/punchcore => $core_source/punchcore"
+  echo "replace github.com/happytrudy/openrung/wsscore => $core_source/wsscore"
+} > "$test_workspace"
 (
   cd "$punch_source"
   if [ -n "$dev_workspace" ]; then
@@ -126,7 +147,7 @@ echo "Testing the OpenRung native bindings"
   else
     # Release mode: force workspace mode off so a stray developer go.work can
     # never make tested code differ from any pinned shared module.
-    GOWORK=off go test ./...
+    GOWORK="$test_workspace" go test ./...
   fi
 )
 
@@ -281,6 +302,10 @@ done
     -require "github.com/happytrudy/openrung/connectcore@$connectcore_version"
     -require "github.com/happytrudy/openrung/punchcore@$punchcore_version"
     -require "github.com/happytrudy/openrung/wsscore@$wsscore_version"
+    -replace "github.com/happytrudy/openrung/brokerapi=$core_source/brokerapi"
+    -replace "github.com/happytrudy/openrung/connectcore=$core_source/connectcore"
+    -replace "github.com/happytrudy/openrung/punchcore=$core_source/punchcore"
+    -replace "github.com/happytrudy/openrung/wsscore=$core_source/wsscore"
   )
   if [ -n "${BROKERAPI_SRC:-}" ]; then
     go_mod_edits+=(
