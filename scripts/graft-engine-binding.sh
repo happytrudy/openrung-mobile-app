@@ -45,7 +45,7 @@ from pathlib import Path
 import sys
 version = json.loads(Path(sys.argv[1]).read_text())["version"]
 Path(sys.argv[2]).write_text(
-    'package libbox\nimport "github.com/openrung/openrung/connectcore/client"\n'
+    'package libbox\nimport "github.com/happytrudy/openrung/connectcore/client"\n'
     'func init() { client.SetAppVersion(' + json.dumps(version) + ') }\n'
 )
 ENGINE_VERSION
