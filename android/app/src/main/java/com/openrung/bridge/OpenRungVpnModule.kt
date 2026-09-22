@@ -16,21 +16,25 @@ import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.facebook.react.modules.core.PermissionAwareActivity
+import com.openrung.state.ConnectionStatus
 import com.openrung.state.OpenRungStatusStore
 import com.openrung.state.OpenRungUiState
 import com.openrung.telemetry.ClientIdentity
-import com.openrung.telemetry.TelemetryManager
+import com.openrung.vpn.ConnectcoreProcessHost
 import com.openrung.vpn.OpenRungVpnService
+import com.openrung.vpn.SplitTunnelStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
  * Classic NativeModule implementing the OpenRungVpn bridge contract (docs/CONTRACT.md §3):
- * prepare/connect/disconnect/getState/getIdentity plus the `openrungStateChanged` event
- * mirroring [OpenRungStatusStore.uiState].
+ * prepare/connect/disconnect/getState/getIdentity/setSplitTunnelConfig plus the
+ * `openrungStateChanged` event mirroring [OpenRungStatusStore.uiState].
  */
 class OpenRungVpnModule(
     private val reactContext: ReactApplicationContext,
@@ -42,9 +46,33 @@ class OpenRungVpnModule(
     init {
         reactContext.addActivityEventListener(this)
         OpenRungStatusStore.initialize(reactContext.applicationContext)
-        TelemetryManager.initialize(reactContext.applicationContext)
         moduleScope.launch {
-            OpenRungStatusStore.uiState.collect { state -> emitStateChanged(state) }
+            // Log-append storms (relay ladder, recovery) coalesce into one trailing emit per
+            // window; every payload is the full latest snapshot, so nothing is lost. Any change
+            // beyond logLines (status, relay, error, recents) still emits immediately.
+            var lastEmitted: OpenRungUiState? = null
+            var pendingLogEmit: Job? = null
+            OpenRungStatusStore.uiState.collect { state ->
+                val previous = lastEmitted
+                if (state == previous) return@collect
+                val logLinesOnlyChange =
+                    previous != null && state.copy(logLines = previous.logLines) == previous
+                if (logLinesOnlyChange) {
+                    if (pendingLogEmit?.isActive != true) {
+                        pendingLogEmit = launch {
+                            delay(LOG_EMIT_COALESCE_MS)
+                            val latest = OpenRungStatusStore.uiState.value
+                            lastEmitted = latest
+                            emitStateChanged(latest)
+                        }
+                    }
+                } else {
+                    pendingLogEmit?.cancel()
+                    pendingLogEmit = null
+                    lastEmitted = state
+                    emitStateChanged(state)
+                }
+            }
         }
     }
 
@@ -90,12 +118,12 @@ class OpenRungVpnModule(
     override fun onNewIntent(intent: Intent) = Unit
 
     @ReactMethod
-    fun connect(brokerUrl: String, targetCountry: String?, promise: Promise) {
+    fun connect(brokerUrl: String, targetCountry: String?, targetRelayId: String?, promise: Promise) {
         try {
             val context = reactContext.applicationContext
             ContextCompat.startForegroundService(
                 context,
-                OpenRungVpnService.connectIntent(context, brokerUrl, targetCountry),
+                OpenRungVpnService.connectIntent(context, brokerUrl, targetCountry, targetRelayId),
             )
             promise.resolve(null)
         } catch (error: Throwable) {
@@ -114,6 +142,35 @@ class OpenRungVpnModule(
         }
     }
 
+    /**
+     * Persists the split-tunnel config JSON (contract §3). If the tunnel is up and the config
+     * actually changed (string comparison against the stored value), the service reapplies it by
+     * reconnecting to the same target. Resolves after persistence + reapply dispatch — not after
+     * the reconnect completes.
+     */
+    @ReactMethod
+    fun setSplitTunnelConfig(configJson: String, promise: Promise) {
+        try {
+            val context = reactContext.applicationContext
+            // Only an EFFECTIVE change reapplies (writeAndReportEffectiveChange still persists the
+            // raw string): a first push of a disabled config, or any change that nets to
+            // the same emitted config, must never bounce a live tunnel. The service re-validates
+            // the connection state before actually reconnecting.
+            val effectiveChanged = SplitTunnelStore.writeAndReportEffectiveChange(context, configJson)
+            val status = OpenRungStatusStore.uiState.value.status
+            if (effectiveChanged &&
+                (status == ConnectionStatus.PREPARING ||
+                    status == ConnectionStatus.CONNECTING ||
+                    status == ConnectionStatus.CONNECTED)
+            ) {
+                context.startService(OpenRungVpnService.reapplyIntent(context))
+            }
+            promise.resolve(null)
+        } catch (error: Throwable) {
+            promise.reject("E_SPLIT_TUNNEL_FAILED", error)
+        }
+    }
+
     @ReactMethod
     fun getState(promise: Promise) {
         promise.resolve(OpenRungStatusStore.uiState.value.toWritableMap())
@@ -123,7 +180,7 @@ class OpenRungVpnModule(
     fun getIdentity(promise: Promise) {
         val identity = Arguments.createMap()
         identity.putString("clientId", ClientIdentity.getOrCreate(reactContext.applicationContext))
-        val sessionId = TelemetryManager.activeSession()?.id
+        val sessionId = ConnectcoreProcessHost.sessionId
         if (sessionId != null) identity.putString("sessionId", sessionId) else identity.putNull("sessionId")
         promise.resolve(identity)
     }
@@ -161,6 +218,8 @@ class OpenRungVpnModule(
         val map = Arguments.createMap()
         map.putString("status", status.name.lowercase())
         if (relayLabel != null) map.putString("relayLabel", relayLabel) else map.putNull("relayLabel")
+        if (relayName != null) map.putString("relayName", relayName) else map.putNull("relayName")
+        if (relayClass != null) map.putString("relayClass", relayClass) else map.putNull("relayClass")
         if (lastError != null) map.putString("lastError", lastError) else map.putNull("lastError")
         val logs = Arguments.createArray()
         logLines.forEach(logs::pushString)
@@ -169,7 +228,9 @@ class OpenRungVpnModule(
         recentRegions.forEach { node ->
             val entry = Arguments.createMap()
             entry.putString("countryCode", node.countryCode)
+            entry.putString("relayId", node.relayId)
             entry.putString("label", node.label)
+            entry.putString("relayName", node.relayName)
             entry.putDouble("latitude", node.latitude)
             entry.putDouble("longitude", node.longitude)
             recents.pushMap(entry)
@@ -183,5 +244,6 @@ class OpenRungVpnModule(
         private const val EVENT_STATE_CHANGED = "openrungStateChanged"
         private const val VPN_REQUEST_CODE = 7001
         private const val NOTIFICATION_REQUEST_CODE = 7002
+        private const val LOG_EMIT_COALESCE_MS = 250L
     }
 }

@@ -8,28 +8,22 @@
  */
 export const en = {
   appName: 'OpenRung',
-  mainTitle: 'openrung://mobile-client',
-  statusFormat: (status: string) => `status = ${status}`,
-  relayFormat: (relay: string) => `relay = ${relay}`,
-  relayLocationUnknown: 'Unknown location',
   actionConnect: 'CONNECT',
   actionDisconnect: 'DISCONNECT',
-  readyLog: 'ready. tap connect to route through a volunteer relay.',
+  readyLog: 'ready. tap connect to route through a relay.',
   logLineFormat: (line: string) => `> ${line}`,
   errorLineFormat: (error: string) => `! ${error}`,
-  trafficRouteConnected: 'traffic route: device -> OpenRung VPN -> volunteer relay',
-  trafficRouteDisconnected: 'vpn is fail-closed: no relay, no connection.',
-  settingsContentDescription: 'Open settings',
   settingsTitle: 'Settings',
   backContentDescription: 'Back',
   openContentDescription: 'Open',
   languageSettingTitle: 'Language',
   languageSettingSubtitle: 'Use system language or choose one for OpenRung.',
-  versionSettingTitle: 'Version',
-  speedTestSettingTitle: 'Volunteer speed test',
-  speedTestReady: 'Download 10 MB through the active volunteer relay and report the result.',
-  speedTestRequiresConnection: 'Connect to a volunteer relay before running the speed test.',
-  speedTestRunning: 'Testing download speed through the volunteer relay…',
+  speedTestSettingTitle: 'Relay speed test',
+  speedTestReady:
+    'Download 10 MB through the active relay and report the result.',
+  speedTestRequiresConnection:
+    'Connect to a relay before running the speed test.',
+  speedTestRunning: 'Testing download speed through the relay…',
   speedTestResult: (mbps: number) => `Download speed: ${mbps.toFixed(1)} Mbps`,
   speedTestError: (error: string) => `Speed test failed: ${error}`,
   speedTestAction: 'RUN',
@@ -49,13 +43,18 @@ export const en = {
   statusConnected: 'Connected',
   statusDisconnecting: 'Disconnecting',
   statusFailed: 'Failed',
-  mapContentDescription: 'Map of available volunteer exit nodes across the Asia-Pacific region',
+  mapContentDescription:
+    'Map of available exit nodes across the Asia-Pacific region',
   mapLoading: 'locating available exit nodes…',
   mapFailed: "couldn't load exit nodes — tap to retry",
   mapNodesAvailable: (count: number) => `${count} locations available`,
   mapNoNodes: 'no exit nodes available right now',
   recentsLabel: 'Recents',
-  recentsEmpty: 'No recent locations yet.',
+  viewToggleMap: 'Map',
+  viewToggleList: 'List',
+  listContentDescription: 'List of available exit nodes',
+  listRelayCount: (count: number) =>
+    count === 1 ? '1 relay' : `${count} relays`,
   debugSettingTitle: 'Debug',
   debugSettingSubtitle: 'Connection console and diagnostics.',
   debugTitle: 'Debug console',
@@ -65,34 +64,104 @@ export const en = {
   licensesIntro:
     'OpenRung is free software licensed under GPL-3.0-or-later because it links sing-box. The complete corresponding source for this build is available at the link below.',
   licensesSourceTitle: 'Source code',
+  privacyPolicyTitle: 'Privacy policy',
+  privacyPolicySubtitle:
+    'How OpenRung handles beta diagnostics and personal information.',
   licensesFullTextTitle: 'Full license texts',
   licensesFullTextSubtitle: 'GNU GPL-3.0 and third-party notices.',
   licensesComponentsHeader: 'Components',
+  shareApkTitle: 'Share OpenRung offline',
+  shareApkSubtitle: 'Send this APK to a nearby Android phone without internet.',
+  shareApkErrorTitle: 'Unable to share OpenRung',
+  shareApkErrorBody:
+    'The APK could not be shared. Keep OpenRung open and try again.',
+  shareApkSplitInstallError:
+    'This copy was installed as multiple APK files and cannot be shared safely. Install the standalone OpenRung APK to use offline sharing.',
+  shareTestFlightTitle: 'Share OpenRung',
+  shareTestFlightSubtitle: 'Send a TestFlight link that installs the iOS beta.',
+  shareTestFlightMessage: 'Join the OpenRung beta on TestFlight:',
+  shareTestFlightErrorTitle: 'Unable to share OpenRung',
+  shareTestFlightErrorBody:
+    'The TestFlight link could not be shared. Try again.',
 
   // --- Redesigned shell (tabs, home overlay, about) ---
   tabHome: 'Home',
   tabSettings: 'Settings',
   tabAbout: 'About us',
-  homeTagline: 'volunteer relay network',
+  homeTagline: 'relay network',
   relayAuto: 'auto relay',
+  // Relay-class badge (stored natural case; upcased at render like other chrome labels).
+  relayClassOfficial: 'official',
+  relayClassVolunteer: 'volunteer',
   settingsGeneralHeader: 'General',
   settingsDiagnosticsHeader: 'Diagnostics',
   aboutTitle: 'About us',
+  aboutMissionLead: 'We believe internet access is a right, not a privilege',
   aboutMissionBody:
-    'OpenRung routes your traffic through relays run by volunteers around the world, keeping the open internet reachable when networks are filtered. No accounts, no ads, no tracking — just people sharing bandwidth.',
-  aboutHowHeader: 'How it works',
-  aboutProjectHeader: 'Project',
-  aboutHow1Title: 'Volunteers share bandwidth',
-  aboutHow1Body:
-    'People everywhere run small relay nodes on their own connections and register them with the network.',
-  aboutHow2Title: 'The broker finds your relay',
-  aboutHow2Body:
-    'When you connect, the broker hands your device a short list of healthy relays and the app picks the first one that answers.',
-  aboutHow3Title: 'Traffic rides an encrypted tunnel',
-  aboutHow3Body:
-    'Everything flows through a VLESS/REALITY tunnel that looks like ordinary TLS, and the VPN is fail-closed: no relay, no traffic.',
-  aboutFootnote:
-    'OpenRung is free software (GPL-3.0-or-later). Built by volunteers, for everyone.',
+    'and not a bargaining chip to be traded away by those in power. The right to information is written into who we are as human beings - and no firewall should be allowed to erase it. Yet today billions of people live behind walls built to keep information out and keep silence in, where a Google search returns 404, a question can be dangerous and curiosity ends at a blocked page.\n\nOpenRung exists to change that.\n\nWe are building a ladder over those walls. Ordinary people around the world share their connections so that someone on the other side of a firewall can reach the open internet.\n\nInformation is power - and that power belongs to us, and not to those who would take it from us.',
+  aboutSupportHeader: 'Support us',
+  donateTitle: 'Donate',
+  donateSubtitle:
+    'Help keep the ladder standing. Donations go to the OpenRung Foundation.',
+  aboutLegalHeader: 'Legal',
+  aboutFollowHeader: 'Follow us',
+
+  // --- Ocean telemetry panel (map view, anchored over the Pacific) ---
+  telemetryNetworkHeader: 'NETWORK',
+  telemetryLinkHeader: 'LINK',
+  telemetryRelaysLabel: 'relays',
+  telemetryLocationsLabel: 'locations',
+  telemetryCountriesLabel: 'countries',
+  telemetryUptimeLabel: 'uptime',
+
+  // --- Split tunneling (settings row + screen + Android app picker) ---
+  splitTunnelSettingTitle: 'Split tunneling',
+  splitTunnelSettingSubtitleOn: 'On — selected traffic bypasses the relay.',
+  splitTunnelSettingSubtitleOff: 'Off — all traffic goes through the relay.',
+  splitTunnelHeader: 'Split tunneling',
+  splitTunnelMasterTitle: 'Split tunneling',
+  splitTunnelMasterSubtitle: 'Send selected traffic outside the relay tunnel.',
+  splitTunnelBypassHeader: 'Bypass',
+  splitTunnelLanTitle: 'Local network',
+  splitTunnelLanSubtitle: 'Reach printers, TVs and other LAN devices directly.',
+  splitTunnelIranTitle: 'Iranian sites & apps',
+  splitTunnelIranSubtitle: 'Route Iranian services directly, at full speed.',
+  splitTunnelChinaTitle: 'Chinese sites & apps',
+  splitTunnelChinaSubtitle: 'Route Chinese services directly, at full speed.',
+  splitTunnelAppsHeader: 'Apps',
+  splitTunnelAppsTitle: 'Bypassed apps',
+  splitTunnelAppsSubtitle: (count: number) =>
+    count === 1 ? '1 app skips the VPN.' : `${count} apps skip the VPN.`,
+  splitTunnelAppPickerTitle: 'Bypassed apps',
+  splitTunnelAppPickerLoading: 'loading installed apps…',
+  splitTunnelAppPickerEmpty: 'no launchable apps found.',
+  splitTunnelAppPickerClose: 'CLOSE',
+  splitTunnelApplyHint:
+    'changes apply immediately; the tunnel reconnects for a few seconds.',
+  // Two variants because the APPS section is Android-only: on iOS the footer must not mention a
+  // bypassed-apps list the user cannot see.
+  splitTunnelResetHint:
+    'the Iran and China presets reset when you restart the app.',
+  splitTunnelResetHintWithApps:
+    'the Iran and China presets reset when you restart the app; bypassed apps are kept.',
+
+  // --- In-app update check (manifest banner / blocking screen / broadcast notice) ---
+  updateRequiredTitle: 'Update required',
+  updateRequiredBody:
+    'This version of OpenRung can no longer connect to the relay network. Install the latest release to keep going.',
+  updateVersionTransition: (current: string, latest: string) =>
+    `v${current} -> v${latest}`,
+  updateActionNow: 'UPDATE',
+  updateActionLater: 'Later',
+  updateContinueAnyway: 'Continue anyway',
+  updateBannerTitle: 'Update available',
+  updateBannerBody: (latest: string) =>
+    `Version ${latest} includes important fixes. Update when you can.`,
+  updateSettingTitle: 'Update available',
+  updateSettingSubtitle: (current: string, latest: string) =>
+    `You have v${current}; v${latest} is out. Tap to get it.`,
+  noticeDismiss: 'Dismiss',
+  noticeLearnMore: 'Learn more',
 };
 
 export type Strings = typeof en;

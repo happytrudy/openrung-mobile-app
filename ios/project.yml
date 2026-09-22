@@ -11,8 +11,10 @@ options:
 
 settings:
   base:
-    MARKETING_VERSION: "1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    # Injected from package.json by scripts/generate-project.sh (the app version string is
+    # single-sourced there; check-versions.mjs enforces the baked pbxproj value matches).
+    MARKETING_VERSION: "${APP_VERSION}"
+    CURRENT_PROJECT_VERSION: "16"
     DEVELOPMENT_TEAM: 9VLV9A7KS9
     CODE_SIGN_STYLE: Automatic
     # The RN bundle phase writes outside the sandbox; Xcode 15+ would block it otherwise.
@@ -38,7 +40,6 @@ settings:
       - "-DFOLLY_HAVE_CLOCK_GETTIME=1"
   configs:
     Debug:
-      ENABLE_BITCODE: "NO"
       GCC_DYNAMIC_NO_PIC: "NO"
       GCC_OPTIMIZATION_LEVEL: "0"
       MTL_ENABLE_DEBUG_INFO: "YES"
@@ -53,16 +54,36 @@ targets:
     sources:
       # App sources incl. the OpenRungVpn native module, LaunchScreen, assets, privacy manifest.
       - path: OpenRung
-      # Shared layer is compiled into BOTH targets (the module reads SharedConnectionState etc.).
+      # Shared layer is compiled into both targets (the module reads SharedConnectionState etc.),
+      # EXCEPT the tunnel-only probe/config inputs below. The app reads only
+      # shared state/identity; PacketTunnel and logic tests compile these inputs.
       - path: Shared
+        excludes:
+          - InternetProbe.swift
+          - SingBoxConfiguration.swift
     dependencies:
       # Embeds the PacketTunnel appex into PlugIns/.
       - target: PacketTunnel
+      # Compile-time only: FRAMEWORK_SEARCH_PATHS entry so `import Libbox`
+      # resolves against the gomobile headers/modulemap. The static archive is
+      # NOT linked here — the symbols come from LibboxKit at link time, so the
+      # ~40 MB Go engine ships once instead of once per executable.
+      - framework: ThirdParty/Libbox.xcframework
+        embed: false
+        link: false
+      # The dynamic wrapper that actually carries the Go engine. Embedded in
+      # Frameworks/ and shared with the PacketTunnel appex via its runpath.
+      - target: LibboxKit
+        embed: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.openrung.mobile
+        PRODUCT_BUNDLE_IDENTIFIER: com.openrung.app
         PRODUCT_NAME: OpenRung
         INFOPLIST_FILE: OpenRung/Info.plist
+        # The prebuilt React.xcframework umbrella resolves its <React/...> includes to the CocoaPods
+        # header copies, which clang treats as non-modular. Xcode 27 builds the module strictly when
+        # an Objective-C file imports it, so allow it (the standard React Native setting).
+        CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES: "YES"
         CODE_SIGN_ENTITLEMENTS: OpenRung/OpenRung.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
@@ -97,18 +118,137 @@ targets:
     sources:
       - path: PacketTunnel
       - path: Shared
+      # Bundled split-tunnel rule sets (provenance + hashes in rulesets/README.md). The provider
+      # verifies each enabled country's pair exists at connect time and drops the country
+      # (fail-open) otherwise.
+      - path: ../rulesets/dist/geosite-ir.srs
+        buildPhase: resources
+      - path: ../rulesets/dist/geoip-ir.srs
+        buildPhase: resources
+      - path: ../rulesets/dist/geosite-cn.srs
+        buildPhase: resources
+      - path: ../rulesets/dist/geoip-cn.srs
+        buildPhase: resources
     dependencies:
-      # Static archive (ar) → linked, never embedded. Present locally at ios/ThirdParty/.
+      # Compile-time only (see the app target's comment): headers/modulemap for
+      # `import Libbox`; the symbols come from LibboxKit.
       - framework: ThirdParty/Libbox.xcframework
         embed: false
+        link: false
+      # Linked but NOT embedded: the appex loads the single copy embedded in
+      # the host app's Frameworks/ through the ../../Frameworks runpath below.
+      # (PlugIns/PacketTunnel.appex/PacketTunnel → ../../Frameworks resolves to
+      # OpenRung.app/Frameworks; sharing a host app's framework this way is the
+      # supported App Store layout for app extensions.)
+      - target: LibboxKit
+        embed: false
       - sdk: UIKit.framework
-      - sdk: libresolv.tbd
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.openrung.mobile.PacketTunnel
+        PRODUCT_BUNDLE_IDENTIFIER: com.openrung.app.PacketTunnel
         INFOPLIST_FILE: PacketTunnel/Info.plist
         CODE_SIGN_ENTITLEMENTS: PacketTunnel/PacketTunnel.entitlements
         APPLICATION_EXTENSION_API_ONLY: "YES"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/Frameworks"
+          - "@executable_path/../../Frameworks"
+
+  # Thin DYNAMIC framework that carries the gomobile Go engine exactly once.
+  # gomobile only emits Libbox as a static archive (ar) inside an XCFramework;
+  # linking that archive into both the app (LibboxBrokerTransport) and the
+  # PacketTunnel appex duplicated the ~40 MB Go blob per executable. LibboxKit
+  # force-loads the whole archive (-Wl,-all_load) into one dylib that re-exports
+  # every Libbox symbol; the app embeds it once and the appex resolves it from
+  # the host app's Frameworks/ at load time. LibboxKit.m is an empty shell —
+  # the target exists only to relink the archive dynamically.
+  LibboxKit:
+    type: framework
+    platform: iOS
+    sources:
+      - path: LibboxKit
+    dependencies:
+      - framework: ThirdParty/Libbox.xcframework
+        embed: false
+      # gomobile's iOS runtime touches UIKit (device/app state hooks).
+      - sdk: UIKit.framework
+      # Libbox's native Apple TLS client (box_apple_tls_client_*) is written
+      # against Network.framework's nw_connection C API.
+      - sdk: Network.framework
+      # Libbox's Go DNS resolver references libresolv; the undefined symbols now
+      # live in this dylib rather than in the app/appex executables.
+      - sdk: libresolv.tbd
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.openrung.app.LibboxKit
+        GENERATE_INFOPLIST_FILE: "YES"
+        # Loaded by the PacketTunnel appex, so extension-safe API only.
+        APPLICATION_EXTENSION_API_ONLY: "YES"
+        SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+        SKIP_INSTALL: "YES"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          # -all_load pulls EVERY object out of the static Libbox archive (a
+          # dummy source references none of them); -ObjC keeps ObjC
+          # classes/categories registered. Libbox is the only static archive on
+          # this target's link line, so -all_load reaches nothing else.
+          - "-ObjC"
+          - "-Wl,-all_load"
+
+  # Hostless logic tests compile the production lifecycle queue, dispatcher,
+  # settings projection and provider probes without React or Libbox. Legacy
+  # error fixtures retain ADR-001 vector coverage without shipping dead policy.
+  # The real Swift/Go A4 suite builds an isolated test framework via
+  # scripts/test-ios-engine-vectors.py; no test hooks enter release artifacts.
+  OpenRungTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: OpenRungTests
+      - path: OpenRung/OpenRungBrokerCoordinator.swift
+      - path: PacketTunnel/PacketTunnelEngineHost.swift
+      - path: PacketTunnel/EngineNetworkObserver.swift
+      - path: PacketTunnel/EngineOperationRunner.swift
+      - path: PacketTunnel/EngineProbeFailure.swift
+      - path: PacketTunnel/EngineTunnelSettings.swift
+      - path: Shared/EngineEventDispatcher.swift
+      - path: Shared/EngineStateProjection.swift
+      - path: PacketTunnel/PacketTunnelDnsProbe.swift
+      - path: PacketTunnel/PacketTunnelInternetProbe.swift
+      - path: Shared/AppConfig.swift
+      # ConnectionStateSnapshot (ConnectionStateSnapshotTests) + the RecentNode type it embeds.
+      - path: Shared/ConnectionStatus.swift
+      - path: Shared/CountryGeo.swift
+      - path: Shared/DeviceAttributes.swift
+      - path: Shared/DnsProbeMessage.swift
+      - path: Shared/InternetProbe.swift
+      - path: Shared/ProbeTargets.swift
+      - path: Shared/NetworkPathMonitor.swift
+      - path: Shared/NativeBrokerTransport.swift
+      - path: Shared/RelayDescriptor.swift
+      - path: Shared/SingBoxConfiguration.swift
+      - path: Shared/SplitTunnelConfig.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.openrung.app.OpenRungTests
+        GENERATE_INFOPLIST_FILE: "YES"
+        CODE_SIGNING_ALLOWED: "NO"
+
+  # Explicit opt-in physical-device tests, hosted inside the signed app so they
+  # can exercise its existing VPN profile and read app-group state/memory.
+  EngineDeviceTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: EngineDeviceTests
+    dependencies:
+      - target: OpenRung
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.openrung.app.EngineDeviceTests
+        GENERATE_INFOPLIST_FILE: "YES"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/OpenRung.app/OpenRung"
+        BUNDLE_LOADER: "$(TEST_HOST)"
 
 schemes:
   # Explicit so the scheme name stays `OpenRung` for the Podfile target + xcodebuild -scheme.
@@ -120,3 +260,24 @@ schemes:
       config: Debug
     archive:
       config: Release
+  OpenRungTests:
+    build:
+      targets:
+        OpenRungTests: [test]
+    test:
+      config: Debug
+      targets:
+        - OpenRungTests
+  PacketTunnel:
+    build:
+      targets:
+        PacketTunnel: all
+  EngineDeviceTests:
+    build:
+      targets:
+        OpenRung: all
+        EngineDeviceTests: [test]
+    test:
+      config: Release
+      targets:
+        - EngineDeviceTests

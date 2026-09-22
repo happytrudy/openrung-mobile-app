@@ -4,7 +4,7 @@ import React
 
 /// React Native bridge for the OpenRung VPN (contract §3). Port of the manager/state half of the
 /// production `AppViewModel`: owns the `NETunnelProviderManager` (found by localizedDescription
-/// "OpenRung Volunteer VPN"), mirrors the rich connection state the PacketTunnel extension
+/// "OpenRung VPN"), mirrors the rich connection state the PacketTunnel extension
 /// publishes via `SharedConnectionState` (re-read on a Darwin notification), watches
 /// `.NEVPNStatusDidChange`, and reports every change to JS as an `openrungStateChanged` event.
 @objc(OpenRungVpn)
@@ -14,12 +14,24 @@ final class OpenRungVpnModule: RCTEventEmitter {
     private var manager: NETunnelProviderManager?
     private var vpnStatus: NEVPNStatus = .invalid
     private var status: ConnectionStatus = .disconnected
+    private var sessionID: String?
     private var relayLabel: String?
+    private var relayName: String?
+    private var relayClass: String?
     private var lastError: String?
     private var logLines: [String] = []
     private var recentRegions: [RecentNode] = []
     private var hasListeners = false
     private var vpnStatusObserver: NSObjectProtocol?
+    /// True while a trailing shared-state reload is scheduled (MainActor-confined). Each reload
+    /// decodes the full snapshot and serializes an 80-line payload across the bridge, so
+    /// notification bursts collapse into one reload ~100 ms later instead of one per line.
+    private var sharedStateReloadScheduled = false
+    /// Bumped by every explicit connect/disconnect and by a split-tunnel reapply. The reapply
+    /// dance stops the tunnel and restarts it after a 350 ms delay; it captures this value before
+    /// sleeping and aborts the restart if a newer command (e.g. the user tapping Disconnect)
+    /// arrived meanwhile — so a settings reapply never resurrects a tunnel the user just stopped.
+    private var controlEpoch = 0
 
     override init() {
         super.init()
@@ -89,15 +101,18 @@ final class OpenRungVpnModule: RCTEventEmitter {
 
     /// Start (or switch) the tunnel. Mirrors `AppViewModel.connect(countryCode:)` including the
     /// production relay-switch dance: stop → 350 ms → reconfigure → start.
-    @objc(connect:targetCountry:resolver:rejecter:)
+    @objc(connect:targetCountry:targetRelayId:resolver:rejecter:)
     func connect(
         _ brokerUrl: String,
         targetCountry: String?,
+        targetRelayId: String?,
         resolver resolve: @escaping RCTPromiseResolveBlock,
         rejecter reject: @escaping RCTPromiseRejectBlock
     ) {
         Task { @MainActor in
+            self.controlEpoch += 1
             let normalizedCountry = Self.normalizedCountryCode(targetCountry)
+            let normalizedRelayID = targetRelayId?.trimmingCharacters(in: .whitespacesAndNewlines)
             let shouldSwitchRelay = self.status.isConnected || self.status.isWorking
             do {
                 guard Self.canUseNetworkExtension else {
@@ -110,7 +125,12 @@ final class OpenRungVpnModule: RCTEventEmitter {
                     self.refreshVPNStatus()
                     try? await Task.sleep(nanoseconds: 350_000_000)
                 }
-                try await self.configure(manager: manager, brokerURL: brokerURL, targetCountry: normalizedCountry)
+                try await self.configure(
+                    manager: manager,
+                    brokerURL: brokerURL,
+                    targetCountry: normalizedCountry,
+                    targetRelayID: normalizedRelayID?.isEmpty == false ? normalizedRelayID : nil
+                )
                 try manager.connection.startVPNTunnel()
                 self.manager = manager
                 self.refreshVPNStatus()
@@ -119,6 +139,11 @@ final class OpenRungVpnModule: RCTEventEmitter {
                 let message = AppError.message(for: error)
                 self.lastError = message
                 self.status = .failed
+                // Relay identity never survives a failure (contract: relayClass/relayName are
+                // null whenever not CONNECTED), matching SharedConnectionState.fail().
+                self.relayLabel = nil
+                self.relayName = nil
+                self.relayClass = nil
                 self.emitStateChanged()
                 reject("connect_failed", message, error)
             }
@@ -128,6 +153,7 @@ final class OpenRungVpnModule: RCTEventEmitter {
     @objc(disconnect:rejecter:)
     func disconnect(_ resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
         Task { @MainActor in
+            self.controlEpoch += 1
             self.manager?.connection.stopVPNTunnel()
             self.refreshVPNStatus()
             resolve(nil)
@@ -141,12 +167,84 @@ final class OpenRungVpnModule: RCTEventEmitter {
         }
     }
 
+    /// Persists the split-tunnel config JSON in the app-group defaults (contract §3). When the
+    /// payload actually changed AND both the shared and system lifecycles report a fully connected
+    /// tunnel, reapplies it with the same relay-switch dance `connect` uses (stop → 350 ms → start;
+    /// providerConfiguration already carries the last targets, so no reconfigure is needed).
+    /// Resolves after persistence + reapply dispatch — not reapply completion — matching Android's
+    /// ACTION_REAPPLY intent semantics.
+    @objc(setSplitTunnelConfig:resolver:rejecter:)
+    func setSplitTunnelConfig(
+        _ configJson: String,
+        resolver resolve: @escaping RCTPromiseResolveBlock,
+        rejecter reject: @escaping RCTPromiseRejectBlock
+    ) {
+        Task { @MainActor in
+            guard let defaults = UserDefaults(suiteName: AppConfig.appGroupIdentifier) else {
+                resolve(nil)
+                return
+            }
+            let stored = defaults.string(forKey: AppConfig.splitTunnelConfigDefaultsKey)
+            // Persist the raw string always, but only reapply when the EFFECTIVE config changed:
+            // a first push of a disabled config, or any change that nets to the same
+            // emitted sing-box config, must never bounce a live tunnel (contract §1). iOS ignores
+            // excluded_packages entirely (no OS-level per-app exclusion), so a packages-only change
+            // is not an effective change here.
+            // Both signatures resolve against ONE region read, so a zone change landing between
+            // them can never masquerade as a config change (and vice versa). A region change is
+            // not this comparison's business anyway: it reaches the engine through the next
+            // connect/recovery rebuild, which re-derives from scratch.
+            let region = SplitTunnelRegion.deviceRegion
+            let effectiveChanged = SplitTunnelConfig.effectiveSignature(ofRawJSON: stored, region: region)
+                != SplitTunnelConfig.effectiveSignature(ofRawJSON: configJson, region: region)
+            if stored != configJson {
+                defaults.set(configJson, forKey: AppConfig.splitTunnelConfigDefaultsKey)
+            }
+            if SplitTunnelReapplyPolicy.shouldReapply(
+                effectiveConfigChanged: effectiveChanged,
+                sharedTunnelIsConnected: self.status == .connected,
+                systemTunnelIsConnected: self.vpnStatus == .connected
+            ),
+               Self.canUseNetworkExtension,
+               let manager = self.manager {
+                self.controlEpoch += 1
+                let reapplyEpoch = self.controlEpoch
+                Task { @MainActor in
+                    manager.connection.stopVPNTunnel()
+                    self.refreshVPNStatus()
+                    try? await Task.sleep(nanoseconds: 350_000_000)
+                    // A connect/disconnect during the sleep bumps controlEpoch; if so, that command
+                    // now owns the tunnel — don't resurrect it against the user's explicit action.
+                    guard self.controlEpoch == reapplyEpoch else {
+                        self.refreshVPNStatus()
+                        return
+                    }
+                    do {
+                        try manager.connection.startVPNTunnel()
+                    } catch {
+                        self.lastError = AppError.message(for: error)
+                        self.status = .failed
+                        // Same failure semantics as the connect() catch above.
+                        self.relayLabel = nil
+                        self.relayName = nil
+                        self.relayClass = nil
+                        self.emitStateChanged()
+                        return
+                    }
+                    self.refreshVPNStatus()
+                }
+            }
+            resolve(nil)
+        }
+    }
+
     @objc(getIdentity:rejecter:)
     func getIdentity(_ resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
         Task { @MainActor in
+            self.refreshVPNStatus(emit: false)
             resolve([
                 "clientId": ClientIdentity.getOrCreate(),
-                "sessionId": TelemetryManager.activeSession()?.id ?? NSNull(),
+                "sessionId": self.sessionID ?? NSNull(),
             ] as [String: Any])
         }
     }
@@ -167,7 +265,16 @@ final class OpenRungVpnModule: RCTEventEmitter {
 
     private func loadOrCreateManager() async throws -> NETunnelProviderManager {
         let managers = try await NETunnelProviderManager.loadAllFromPreferences()
-        if let existing = managers.first(where: { $0.localizedDescription == AppConfig.vpnProfileName }) {
+        if let existing = managers.first(where: {
+            $0.localizedDescription == AppConfig.vpnProfileName
+        }) {
+            return existing
+        }
+        if let existing = managers.first(where: {
+            $0.localizedDescription == AppConfig.legacyVPNProfileName
+        }) {
+            // The next configure/save migrates profiles created before the terminology change.
+            existing.localizedDescription = AppConfig.vpnProfileName
             return existing
         }
         let manager = NETunnelProviderManager()
@@ -175,13 +282,21 @@ final class OpenRungVpnModule: RCTEventEmitter {
         return manager
     }
 
-    private func configure(manager: NETunnelProviderManager, brokerURL: URL, targetCountry: String?) async throws {
+    private func configure(
+        manager: NETunnelProviderManager,
+        brokerURL: URL,
+        targetCountry: String?,
+        targetRelayID: String? = nil
+    ) async throws {
         let tunnelProtocol = NETunnelProviderProtocol()
         tunnelProtocol.providerBundleIdentifier = AppConfig.packetTunnelBundleIdentifier
         tunnelProtocol.serverAddress = brokerURL.host ?? brokerURL.absoluteString
         var providerConfiguration = [AppConfig.providerBrokerURLKey: brokerURL.absoluteString]
         if let targetCountry {
             providerConfiguration[AppConfig.providerTargetCountryKey] = targetCountry
+        }
+        if let targetRelayID {
+            providerConfiguration[AppConfig.providerTargetRelayIDKey] = targetRelayID
         }
         tunnelProtocol.providerConfiguration = providerConfiguration
         manager.protocolConfiguration = tunnelProtocol
@@ -210,7 +325,7 @@ final class OpenRungVpnModule: RCTEventEmitter {
             { _, observer, _, _, _ in
                 guard let observer else { return }
                 let module = Unmanaged<OpenRungVpnModule>.fromOpaque(observer).takeUnretainedValue()
-                Task { @MainActor in module.reloadSharedState() }
+                Task { @MainActor in module.scheduleSharedStateReload() }
             },
             AppConfig.darwinNotificationName as CFString,
             nil,
@@ -219,27 +334,36 @@ final class OpenRungVpnModule: RCTEventEmitter {
     }
 
     @MainActor
-    private func reloadSharedState() {
-        apply(SharedConnectionState.snapshot())
+    private func scheduleSharedStateReload() {
+        guard !sharedStateReloadScheduled else { return }
+        sharedStateReloadScheduled = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            self.sharedStateReloadScheduled = false
+            self.reloadSharedState()
+        }
     }
 
     @MainActor
-    private func refreshVPNStatus() {
+    private func reloadSharedState() {
+        // A delayed Darwin notification must not restore a crashed tunnel's identity.
+        refreshVPNStatus()
+    }
+
+    @MainActor
+    private func refreshVPNStatus(emit: Bool = true) {
         vpnStatus = manager?.connection.status ?? .invalid
-        apply(SharedConnectionState.snapshot(), emit: false)
-        // If the OS reports the tunnel is fully down but the extension's last write was optimistic
-        // (e.g. it was killed without recording a terminal state), reflect disconnected.
-        if vpnStatus == .disconnected || vpnStatus == .invalid,
-           status == .connected || status == .connecting || status == .preparing {
-            status = .disconnected
-            relayLabel = nil
-        }
-        emitStateChanged()
+        var snapshot = SharedConnectionState.snapshot()
+        snapshot.reconcileSystemTunnel(isDown: vpnStatus == .disconnected || vpnStatus == .invalid)
+        apply(snapshot, emit: emit)
     }
 
     private func apply(_ snapshot: ConnectionStateSnapshot, emit: Bool = true) {
         status = snapshot.status
+        sessionID = snapshot.sessionID
         relayLabel = snapshot.relayLabel
+        relayName = snapshot.relayName
+        relayClass = snapshot.relayClass
         lastError = snapshot.lastError
         logLines = snapshot.logLines
         recentRegions = snapshot.recentRegions
@@ -260,12 +384,16 @@ final class OpenRungVpnModule: RCTEventEmitter {
         [
             "status": status.rawValue,
             "relayLabel": relayLabel ?? NSNull(),
+            "relayName": relayName ?? NSNull(),
+            "relayClass": relayClass ?? NSNull(),
             "lastError": lastError ?? NSNull(),
             "logLines": logLines,
             "recents": recentRegions.map { node in
                 [
                     "countryCode": node.countryCode,
+                    "relayId": node.relayId ?? NSNull(),
                     "label": node.label,
+                    "relayName": node.relayName ?? NSNull(),
                     "latitude": node.latitude,
                     "longitude": node.longitude,
                 ] as [String: Any]

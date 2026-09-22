@@ -1,41 +1,104 @@
 /**
- * About us tab: wordmark hero with version pill, mission paragraph, a
- * numbered "how it works" walkthrough (volunteers -> broker -> encrypted
- * tunnel), then source-code / open-source-licenses panels and the GPL
- * footnote. Version and licensing moved here from Settings so the Settings
- * tab stays purely operational.
+ * About us tab: wordmark hero with version pill and project manifesto, followed
+ * by privacy / open-source-licenses panels and icon-only links to the website
+ * and social profiles. Version and licensing live here so the Settings tab
+ * stays purely operational.
  */
 import React, { useCallback } from 'react';
-import { Linking, ScrollView, StyleSheet, Text, View } from 'react-native';
+import {
+  Linking,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { SettingPanel } from '../components/SettingPanel';
+import {
+  BlueskyIcon,
+  GitHubIcon,
+  InstagramIcon,
+  TelegramIcon,
+  ThreadsIcon,
+  WebsiteIcon,
+  XIcon,
+} from '../components/SocialIcons';
 import { APP_VERSION, AppConfig } from '../config';
-import { useStrings, type Strings } from '../i18n';
+import { useStrings } from '../i18n';
 import { monoFont, palette, tokens } from '../theme';
 
 export interface AboutScreenProps {
   onOpenLicenses: () => void;
 }
 
-interface HowStep {
-  title: (s: Strings) => string;
-  body: (s: Strings) => string;
-}
+const SOCIAL_LINKS = [
+  {
+    label: 'OpenRung website',
+    url: AppConfig.WEBSITE_URL,
+    color: palette.terminalGreen,
+    Icon: WebsiteIcon,
+  },
+  {
+    label: 'OpenRung on GitHub',
+    url: AppConfig.GITHUB_URL,
+    color: palette.bodyText,
+    Icon: GitHubIcon,
+  },
+  {
+    label: 'OpenRung on X',
+    url: AppConfig.X_URL,
+    color: palette.bodyText,
+    Icon: XIcon,
+  },
+  {
+    label: 'OpenRung on Threads',
+    url: AppConfig.THREADS_URL,
+    color: palette.bodyText,
+    Icon: ThreadsIcon,
+  },
+  {
+    label: 'OpenRung on Bluesky',
+    url: AppConfig.BLUESKY_URL,
+    color: '#1185FE',
+    Icon: BlueskyIcon,
+  },
+  {
+    label: 'OpenRung on Instagram',
+    url: AppConfig.INSTAGRAM_URL,
+    color: '#E4405F',
+    Icon: InstagramIcon,
+  },
+  {
+    label: 'OpenRung Telegram bot',
+    url: AppConfig.TELEGRAM_URL,
+    color: '#26A5E4',
+    Icon: TelegramIcon,
+  },
+] as const;
 
-const HOW_STEPS: HowStep[] = [
-  { title: s => s.aboutHow1Title, body: s => s.aboutHow1Body },
-  { title: s => s.aboutHow2Title, body: s => s.aboutHow2Body },
-  { title: s => s.aboutHow3Title, body: s => s.aboutHow3Body },
-];
-
-export function AboutScreen({ onOpenLicenses }: AboutScreenProps): React.JSX.Element {
+export function AboutScreen({
+  onOpenLicenses,
+}: AboutScreenProps): React.JSX.Element {
   const s = useStrings();
   const insets = useSafeAreaInsets();
 
-  const onOpenSource = useCallback(() => {
-    Linking.openURL(AppConfig.SOURCE_URL).catch(() => {
+  const onOpenDonate = useCallback(() => {
+    Linking.openURL(AppConfig.DONATE_URL).catch(() => {
       // Ignore: no browser available.
+    });
+  }, []);
+
+  const onOpenPrivacy = useCallback(() => {
+    Linking.openURL(AppConfig.PRIVACY_URL).catch(() => {
+      // Ignore: no browser available.
+    });
+  }, []);
+
+  const onOpenSocial = useCallback((url: string) => {
+    Linking.openURL(url).catch(() => {
+      // Ignore: no browser or matching app available.
     });
   }, []);
 
@@ -60,27 +123,37 @@ export function AboutScreen({ onOpenLicenses }: AboutScreenProps): React.JSX.Ele
           </View>
         </View>
         <Text style={styles.heroTagline}>{s.homeTagline}</Text>
+        <Text style={styles.missionLead}>{s.aboutMissionLead}</Text>
         <Text style={styles.mission}>{s.aboutMissionBody}</Text>
       </View>
 
-      <Text style={styles.sectionHeader}>{s.aboutHowHeader.toUpperCase()}</Text>
-      <View style={styles.steps}>
-        {HOW_STEPS.map((step, index) => (
-          <View key={index} style={styles.step}>
-            <Text style={styles.stepIndex}>{String(index + 1).padStart(2, '0')}</Text>
-            <View style={styles.stepText}>
-              <Text style={styles.stepTitle}>{step.title(s)}</Text>
-              <Text style={styles.stepBody}>{step.body(s)}</Text>
-            </View>
-          </View>
-        ))}
-      </View>
+      <Text style={styles.sectionHeader}>
+        {s.aboutSupportHeader.toUpperCase()}
+      </Text>
+      <Pressable
+        accessibilityRole="link"
+        accessibilityLabel={s.donateTitle}
+        onPress={onOpenDonate}
+        style={({ pressed }) => [
+          styles.donateButton,
+          pressed && styles.donateButtonPressed,
+        ]}
+      >
+        <Text style={styles.donateHeart}>♥</Text>
+        <View style={styles.donateTextColumn}>
+          <Text style={styles.donateTitle}>{s.donateTitle}</Text>
+          <Text style={styles.donateSubtitle}>{s.donateSubtitle}</Text>
+        </View>
+        <Text style={styles.donateChevron}>›</Text>
+      </Pressable>
 
-      <Text style={styles.sectionHeader}>{s.aboutProjectHeader.toUpperCase()}</Text>
+      <Text style={styles.sectionHeader}>
+        {s.aboutLegalHeader.toUpperCase()}
+      </Text>
       <SettingPanel
-        title={s.licensesSourceTitle}
-        subtitle={AppConfig.SOURCE_URL}
-        onPress={onOpenSource}
+        title={s.privacyPolicyTitle}
+        subtitle={s.privacyPolicySubtitle}
+        onPress={onOpenPrivacy}
       />
       <SettingPanel
         title={s.licensesSettingTitle}
@@ -88,7 +161,26 @@ export function AboutScreen({ onOpenLicenses }: AboutScreenProps): React.JSX.Ele
         onPress={onOpenLicenses}
       />
 
-      <Text style={styles.footnote}>{s.aboutFootnote}</Text>
+      <Text style={styles.sectionHeader}>
+        {s.aboutFollowHeader.toUpperCase()}
+      </Text>
+      <View style={styles.socialRow}>
+        {SOCIAL_LINKS.map(({ label, url, color, Icon }) => (
+          <Pressable
+            key={url}
+            accessibilityRole="link"
+            accessibilityLabel={label}
+            hitSlop={6}
+            onPress={() => onOpenSocial(url)}
+            style={({ pressed }) => [
+              styles.socialButton,
+              pressed && styles.socialButtonPressed,
+            ]}
+          >
+            <Icon color={color} size={20} />
+          </Pressable>
+        ))}
+      </View>
     </ScrollView>
   );
 }
@@ -114,8 +206,8 @@ const styles = StyleSheet.create({
     backgroundColor: palette.panel,
     borderWidth: 1,
     borderColor: palette.borderDim,
-    padding: 18,
-    gap: 6,
+    padding: 16,
+    gap: 4,
   },
   heroRow: {
     flexDirection: 'row',
@@ -149,12 +241,70 @@ const styles = StyleSheet.create({
     fontSize: 11,
     letterSpacing: 1.2,
   },
-  mission: {
-    marginTop: 8,
+  missionLead: {
+    marginTop: 10,
     color: palette.bodyText,
     fontFamily: monoFont,
-    fontSize: 13,
+    fontWeight: 'bold',
+    fontSize: 14,
     lineHeight: 20,
+  },
+  mission: {
+    marginTop: 2,
+    color: palette.bodyText,
+    fontFamily: monoFont,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  // Deliberately louder than SettingPanel rows: terminal-green border + glow
+  // and a tinted fill so the donate call-to-action stands out from Legal.
+  donateButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    borderRadius: 8,
+    backgroundColor: palette.fabBackground,
+    borderWidth: 1,
+    borderColor: palette.terminalGreen,
+    padding: 14,
+    shadowColor: tokens.glow,
+    shadowOpacity: 1,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 6,
+  },
+  donateButtonPressed: {
+    opacity: 0.7,
+  },
+  donateHeart: {
+    color: palette.terminalGreen,
+    fontSize: 20,
+    textShadowColor: tokens.glow,
+    textShadowRadius: 10,
+  },
+  donateTextColumn: {
+    flex: 1,
+    gap: 2,
+  },
+  donateTitle: {
+    color: palette.terminalGreen,
+    fontFamily: monoFont,
+    fontWeight: 'bold',
+    fontSize: 15,
+    textShadowColor: tokens.glowSoft,
+    textShadowRadius: 8,
+  },
+  donateSubtitle: {
+    color: palette.bodyText,
+    fontFamily: monoFont,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  donateChevron: {
+    color: palette.terminalGreen,
+    fontFamily: monoFont,
+    fontSize: 20,
+    fontWeight: 'bold',
   },
   sectionHeader: {
     color: palette.dimText,
@@ -164,46 +314,22 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5,
     marginTop: 8,
   },
-  steps: {
-    gap: 10,
-  },
-  step: {
+  socialRow: {
     flexDirection: 'row',
-    gap: 14,
-    borderRadius: tokens.radiusMd,
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  socialButton: {
+    width: 34,
+    height: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: tokens.radiusSm,
     backgroundColor: palette.panel,
     borderWidth: 1,
     borderColor: palette.borderDim,
-    padding: 16,
   },
-  stepIndex: {
-    color: palette.terminalGreen,
-    fontFamily: monoFont,
-    fontWeight: 'bold',
-    fontSize: 16,
-  },
-  stepText: {
-    flex: 1,
-    gap: 4,
-  },
-  stepTitle: {
-    color: palette.bodyText,
-    fontFamily: monoFont,
-    fontWeight: 'bold',
-    fontSize: 13,
-  },
-  stepBody: {
-    color: palette.dimText,
-    fontFamily: monoFont,
-    fontSize: 12,
-    lineHeight: 18,
-  },
-  footnote: {
-    marginTop: 6,
-    textAlign: 'center',
-    color: palette.dimText,
-    fontFamily: monoFont,
-    fontSize: 11,
-    lineHeight: 17,
+  socialButtonPressed: {
+    opacity: 0.6,
   },
 });

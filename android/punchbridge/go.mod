@@ -1,0 +1,20 @@
+module github.com/sagernet/sing-box/experimental/libbox
+
+go 1.25.0
+
+require (
+	github.com/happytrudy/openrung/brokerapi v0.6.1
+	github.com/happytrudy/openrung/connectcore v0.6.2
+	github.com/happytrudy/openrung/punchcore v0.1.0
+	github.com/happytrudy/openrung/wsscore v0.7.0
+	github.com/quic-go/quic-go v0.60.0
+	github.com/sagernet/quic-go v0.59.0-sing-box-mod.4
+)
+
+require (
+	github.com/gorilla/websocket v1.5.3 // indirect
+	github.com/hashicorp/yamux v0.1.2 // indirect
+	golang.org/x/crypto v0.51.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
+)

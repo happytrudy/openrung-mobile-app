@@ -1,0 +1,66 @@
+# Third-party iOS engine artifacts
+
+> **License / GPL corresponding source.** sing-box is **GPL-3.0-or-later** and
+> `Libbox.xcframework` is statically linked (force-loaded whole) into the
+> `LibboxKit.framework` dylib, which ships once in the app bundle and is loaded
+> by both the app and the PacketTunnel extension, so the whole iOS app is
+> GPL-3.0-or-later (see the repo `LICENSE` and `THIRD_PARTY_NOTICES.md`). The build below pins the **exact sing-box
+> revision** recorded in [`../../SINGBOX_VERSION`](../../SINGBOX_VERSION). The
+> OpenRung's broker, punch, and WSS wrappers also resolve the exact `brokerapi`,
+> `connectcore`, `punchcore`, and `wsscore` tags pinned in
+> [`../../android/punchbridge/go.mod`](../../android/punchbridge/go.mod), so the
+> GPL §6 corresponding source is reproducible — keep those pins in lockstep
+> with the shipped binary (see [`../../RELEASE.md`](../../RELEASE.md)).
+>
+> **App Store caveat:** distributing this GPL-linked binary through the App
+> Store (and likely external TestFlight) conflicts with Apple's Usage Rules /
+> DRM under GPL §6/§10. OpenRung cannot resolve this for the sing-box portion
+> alone — resolve it before any public App Store release (exception from
+> SagerNet, or move to an out-of-process engine).
+
+`Libbox.xcframework` is generated locally from sing-box and intentionally
+ignored by git because it is large.
+
+To rebuild both the iOS device and simulator slices (run from the repo root):
+
+```sh
+go install github.com/sagernet/gomobile/cmd/gomobile@v0.1.12
+go install github.com/sagernet/gomobile/cmd/gobind@v0.1.12
+PATH="$(go env GOPATH)/bin:$PATH" gomobile init
+./ios/build-libbox-release.sh
+```
+
+The script downloads the exact sing-box pseudo-version, grafts only the thin
+OpenRung broker, punch, and WSS bindings into `experimental/libbox`, trims
+sing-box's
+libbox build tags to OpenRung's feature set (dropping Tailscale, WireGuard, and
+naiveproxy — see [`../../RELEASE.md`](../../RELEASE.md) §2), resolves the tagged
+`brokerapi`, `connectcore`, `punchcore`, and `wsscore` modules, and emits one
+unified
+`Libbox.xcframework`. This is required because a second gomobile framework
+would load a second, incompatible Go runtime. Shared transport implementations
+are never copied into this repository. Swift confines generated broker objects
+to `LibboxBrokerTransport`, copies value snapshots before close, and supplies
+separate iOS and React Native factories from this one framework/runtime.
+Before installation, the build script links a small constructor smoke
+executable against both Apple slices, checks punch, WSS, React Native broker,
+speed, and manifest symbols, and verifies project.yml's single-copy engine
+layout: the LibboxKit target must force-load the archive (`-Wl,-all_load`) and
+declare `libresolv.tbd` + `Network.framework`, and the app and PacketTunnel
+targets must reference LibboxKit.
+
+For development against unpublished local checkouts, use any of:
+
+```sh
+BROKERAPI_SRC=/absolute/path/to/brokerapi \
+CONNECTCORE_SRC=/absolute/path/to/connectcore \
+PUNCHCORE_SRC=/absolute/path/to/punchcore \
+WSSCORE_SRC=/absolute/path/to/wsscore \
+./ios/build-libbox-release.sh
+```
+
+Artifacts built this way are explicitly non-release builds; omit all
+variables to verify the pinned tags used for distribution.
+
+The Android AAR is built from the same pinned revision by
+[`../../android/build-libbox-release.sh`](../../android/build-libbox-release.sh).

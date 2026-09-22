@@ -1,4 +1,7 @@
-import { candidates } from './net/brokerClient';
+// The app version string lives in exactly ONE place — package.json — and every other
+// surface (Android versionName, iOS MARKETING_VERSION, this constant) derives from it so
+// they cannot drift. scripts/check-versions.mjs enforces this in CI.
+import { version } from '../package.json';
 
 /**
  * App configuration, ported 1:1 from the production `config/AppConfig.kt`
@@ -6,58 +9,56 @@ import { candidates } from './net/brokerClient';
  */
 export const AppConfig = {
   /**
-   * Discovery broker (relay-list bootstrap) default. Prefer the HTTPS, Cloudflare-fronted endpoint:
-   * discovery is the censorship-critical path — it runs BEFORE the VPN tunnel is up — and TLS + CDN
-   * edge IPs make it costly to block. Falls back to the raw origin IP; see DEFAULT_BROKER_URLS.
+   * Primary broker passed to the native brokerapi selector. Go owns the built-in candidates,
+   * custom-override policy, staggered racing, relay verification, and transport selection.
    */
   DEFAULT_BROKER_URL: 'https://broker.openrung.org/',
 
   /**
-   * Telemetry / heartbeat / speed-test target: the raw origin IP, NOT the Cloudflare-fronted
-   * hostname. Heartbeats fire ~once/minute per connected user; routing them through the Cloudflare
-   * Worker would burn the Workers free-tier quota (100k requests/day). They ride the established VPN
-   * tunnel so they don't need the CDN front (and it's the same broker either way). Discovery stays
-   * fronted (low volume, pre-tunnel, needs the resilience); telemetry goes direct (high volume).
+   * Native brokerapi target for the React Native speed test and its small telemetry batch.
+   * General VPN telemetry remains owned by the Android VPN service and iOS PacketTunnel.
    */
-  TELEMETRY_BROKER_URL: 'http://54.238.185.205:8080/',
+  TELEMETRY_BROKER_URL: 'https://broker.openrung.org/',
 
   /**
-   * Ordered discovery candidates, tried in order until one returns relays (see
-   * `firstReachable` in `net/brokerClient.ts`): the Cloudflare-fronted endpoint first, then the
-   * raw IP as a fallback so a blocked edge never takes discovery offline. The raw cleartext IP is
-   * why cleartext HTTP stays allowed in both native app configs.
-   */
-  DEFAULT_BROKER_URLS: ['https://broker.openrung.org/', 'http://54.238.185.205:8080/'],
-
-  /**
-   * Ordered discovery candidates for a connection attempt: the caller-selected `primary` (a user
-   * override or the persisted choice) first, then the built-in DEFAULT_BROKER_URLS, de-duplicated
-   * while preserving order. The primary is never discarded, so a user's custom broker is always
-   * tried first and the defaults only act as a fallback.
-   */
-  brokerCandidates(primary: string | null | undefined): string[] {
-    return candidates(primary, AppConfig.DEFAULT_BROKER_URLS);
-  },
-
-  RELAY_LIMIT: 5,
-  VPN_SESSION_NAME: 'OpenRung Volunteer VPN',
-  STATUS_PREFS: 'openrung_status',
-
-  /**
-   * Relay fetch used to populate the exit-node map directory (the connect path still uses
-   * RELAY_LIMIT). This is the broker's maximum allowed page size — the broker rejects anything
-   * larger with HTTP 400 — so it captures the full set of currently-advertised relays.
+   * Relay fetch used to populate the exit-node map directory. This is the broker's maximum
+   * allowed page size — the broker rejects anything larger with HTTP 400 — so it captures the
+   * full set of currently-advertised relays.
    */
   DIRECTORY_RELAY_LIMIT: 20,
-
-  /** Most-recently connected locations kept for the main-screen "Recents" row. */
-  MAX_RECENTS: 8,
 
   /**
    * Public source repository. Surfaced in the in-app open-source licenses screen and used as the
    * GPL-3.0 corresponding-source offer for the (GPL-licensed) app.
    */
-  SOURCE_URL: 'https://github.com/openrung/openrung',
+  SOURCE_URL: 'https://github.com/openrung/openrung-mobile-app',
+
+  /** Public policy covering app and network data handling. */
+  PRIVACY_URL: 'https://www.openrung.org/privacy',
+
+  /**
+   * Every.org donation page for the OpenRung Foundation, opened in the system browser from the
+   * About screen's donate button. The `code` query param attributes donations to the mobile app.
+   */
+  DONATE_URL: 'https://www.every.org/openrung-foundation?code=af922628#/donate',
+
+  /** Public website and official social profiles shown on the About screen. */
+  WEBSITE_URL: 'https://openrung.org/',
+  GITHUB_URL: 'https://github.com/openrung',
+  X_URL: 'https://x.com/OpenRung',
+  THREADS_URL: 'https://www.threads.com/@openrung',
+  BLUESKY_URL: 'https://bsky.app/profile/openrung.bsky.social',
+  INSTAGRAM_URL: 'https://www.instagram.com/openrung',
+  TELEGRAM_URL: 'https://t.me/openrung_bot',
+
+  /**
+   * TestFlight public invite link for the iOS beta, shared from Settings → "Share OpenRung"
+   * (the iOS counterpart of Android's offline APK sharing). Regenerate it in App Store Connect →
+   * TestFlight → external group → Public Link if the group is ever recreated; the Settings row
+   * hides itself whenever this is empty. Note RELEASE.md §5: external TestFlight distribution of
+   * the GPL-linked binary has an unresolved licensing caveat.
+   */
+  TESTFLIGHT_URL: 'https://testflight.apple.com/join/RMTt4UfQ',
 
   /**
    * Vector tiles + glyphs for the exit-node map. We build our own flat style around these MapLibre
@@ -66,7 +67,59 @@ export const AppConfig = {
    */
   MAP_TILES_URL: 'https://demotiles.maplibre.org/tiles/tiles.json',
   MAP_GLYPHS_URL: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+
+  /**
+   * Ordered candidates for the in-app update manifest (docs/UPDATE_MANIFEST.md), tried
+   * sequentially with a per-attempt timeout, fail-open: all-fail just means "no update UI".
+   * The CloudFront and direct broker candidates use native brokerapi. CloudFront leads because the
+   * SNI-less front stays reachable where broker.openrung.org is blocked, mirroring brokerapi's
+   * discovery order (@see brokerapi.DefaultBrokerURLs). The GitHub release asset is
+   * the narrow redirecting JavaScript-fetch exception and remains last because github.com is
+   * unreliable in several target regions.
+   * These URLs are a FOREVER CONTRACT with shipped clients: never repurpose or break them.
+   * This list MUST stay identical (same entries, same order) to `MANIFEST_CANDIDATE_URLS` in
+   * net/updateManifestClient.ts, which is the routing allowlist: an entry the router does not
+   * recognize throws inside the fail-open walk and is swallowed, silently demoting the app to the
+   * GitHub-only candidate. `npm run transport:check` and updateManifest.test.ts enforce the match.
+   */
+  UPDATE_MANIFEST_URLS: [
+    'https://d2r7mdpyevvs1m.cloudfront.net/api/v1/app-manifest',
+    'https://broker.openrung.org/api/v1/app-manifest',
+    'https://github.com/openrung/openrung-mobile-app/releases/latest/download/update-manifest.json',
+  ],
+
+  /**
+   * Where the "Update" buttons send Android users. Deliberately a pinned constant — update
+   * destinations NEVER come from the manifest, so even a validly-signed (let alone forged)
+   * manifest cannot redirect users to a hostile download. iOS uses TESTFLIGHT_URL.
+   */
+  UPDATE_URL_ANDROID:
+    'https://github.com/openrung/openrung-mobile-app/releases/latest',
+
+  /** Minimum interval between successful update-manifest checks (cold start + app foreground). */
+  UPDATE_CHECK_INTERVAL_MS: 6 * 3_600_000,
+
+  /** Minimum interval between retries after a failed check (in-memory, per app session). */
+  UPDATE_CHECK_RETRY_MS: 15 * 60_000,
+
+  /**
+   * Pinned Ed25519 public keys for update-manifest signature verification. The manifest can
+   * hard-block app startup, so its signing key is scoped to exactly that power and remains in
+   * TypeScript even though relay verification moved into native brokerapi.
+   * The client only ever hard-blocks ("Update required") on a manifest that verifies against one
+   * of these keys; unsigned or unverifiable manifests are capped at the passive update row. MUST
+   * stay in sync with the `pinned_keys` block of testdata/update_manifest_vectors.json (CI guard
+   * in updateManifest.test.ts + scripts/update-manifest.mjs check). Rotation: keygen mode of
+   * scripts/update-manifest.mjs, pin the new key here, ship a release, then swap the secret.
+   */
+  MANIFEST_SIGNING_KEYS: [
+    {
+      keyId: 'a71d7615b7af163b', // active (seed in GitHub secret OPENRUNG_MANIFEST_SIGNING_SEED_B64)
+      publicKeyHex:
+        '3443068d4cb27dd474dee11155c365a44df6a24c560b8ae2cb019487b555bfc7',
+    },
+  ],
 } as const;
 
 /** App version reported in X-OpenRung-App-Version (production uses BuildConfig.VERSION_NAME). */
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = version;

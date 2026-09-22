@@ -1,40 +1,85 @@
 /**
  * Settings tab. Large title (it's a root tab now — no back arrow), then
- * sectioned panels: GENERAL (language) and DIAGNOSTICS (volunteer speed test,
- * debug console). Version and licenses live on the About tab. The language
+ * sectioned panels: GENERAL (language, split tunneling, plus per-platform
+ * sharing — Android offline APK, iOS TestFlight invite link) and DIAGNOSTICS
+ * (relay speed test, debug console). Version and licenses live on the About tab. The language
  * picker mirrors the production dropdown semantics with a dark-styled modal
  * list; the speed test RUN button is enabled only while connected and not
  * already running.
  */
-import React, { useCallback, useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  Alert,
+  Linking,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  Share,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { SettingPanel } from '../components/SettingPanel';
-import { AppConfig } from '../config';
+import { APP_VERSION, AppConfig } from '../config';
 import { languageOptions, useLanguage, useStrings } from '../i18n';
+import {
+  apkShareErrorCode,
+  isApkShareAvailable,
+  shareInstalledApk,
+} from '../native/OpenRungApkShare';
+import { OpenRungBrokerError } from '../native/OpenRungBroker';
 import { OpenRungVpn } from '../native/OpenRungVpn';
 import { runSpeedTest, type SpeedTestResult } from '../net/speedTestClient';
+import { useAppSelector } from '../state/store';
 import {
   buildSpeedTestCompletedEvent,
   buildSpeedTestFailedEvent,
   sendTelemetry,
 } from '../net/telemetryClient';
-import { useVpnState } from '../state/useVpnState';
 import { monoFont, palette, tokens } from '../theme';
 
 export interface SettingsScreenProps {
   onOpenDebug: () => void;
+  onOpenSplitTunneling: () => void;
 }
 
-export function SettingsScreen({ onOpenDebug }: SettingsScreenProps): React.JSX.Element {
+/**
+ * iOS counterpart of Android's offline APK sharing: nothing to link natively — the TestFlight
+ * invite link just goes to the system share sheet. Hidden until TESTFLIGHT_URL is configured.
+ */
+const isTestFlightShareAvailable =
+  Platform.OS === 'ios' && AppConfig.TESTFLIGHT_URL.length > 0;
+
+export function SettingsScreen({
+  onOpenDebug,
+  onOpenSplitTunneling,
+}: SettingsScreenProps): React.JSX.Element {
   const s = useStrings();
   const insets = useSafeAreaInsets();
-  const { isConnected } = useVpnState();
+  // Selectors, not the whole store: on iOS this scene stays mounted behind the other tabs, so
+  // it must not re-render on every mirrored native event (log lines, recents).
+  const isConnected = useAppSelector(current => current.native.status === 'connected');
+  const update = useAppSelector(current => current.update);
+  const splitTunnel = useAppSelector(current => current.splitTunnel);
 
   const [speedTestRunning, setSpeedTestRunning] = useState(false);
   const [speedTestResult, setSpeedTestResult] = useState<SpeedTestResult | null>(null);
   const [speedTestError, setSpeedTestError] = useState<string | null>(null);
+
+  const mountedRef = useRef(true);
+  const runControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      // Android unmounts inactive tabs. Abort an in-flight native speed test on unmount so its
+      // single-use broker operation is closed instead of finishing in the background.
+      mountedRef.current = false;
+      runControllerRef.current?.abort();
+    };
+  }, []);
 
   // Same precedence as production: running > error > result > requires-connection > ready.
   const speedTestSubtitle = speedTestRunning
@@ -49,13 +94,45 @@ export function SettingsScreen({ onOpenDebug }: SettingsScreenProps): React.JSX.
 
   const runEnabled = isConnected && !speedTestRunning;
 
+  const onShareApk = useCallback(() => {
+    shareInstalledApk(s.shareApkTitle).catch(error => {
+      const message =
+        apkShareErrorCode(error) === 'E_SPLIT_APK_INSTALL'
+          ? s.shareApkSplitInstallError
+          : s.shareApkErrorBody;
+      Alert.alert(s.shareApkErrorTitle, message);
+    });
+  }, [s]);
+
+  const onOpenUpdate = useCallback(() => {
+    // Pinned destination only — never a manifest-supplied URL (see AppConfig.UPDATE_URL_ANDROID).
+    const url = Platform.OS === 'ios' ? AppConfig.TESTFLIGHT_URL : AppConfig.UPDATE_URL_ANDROID;
+    Linking.openURL(url).catch(() => {
+      // Best-effort: ignore devices without a browser handler.
+    });
+  }, []);
+
+  const onShareTestFlight = useCallback(() => {
+    Share.share(
+      { message: s.shareTestFlightMessage, url: AppConfig.TESTFLIGHT_URL },
+      { subject: s.shareTestFlightTitle },
+    ).catch(() => {
+      Alert.alert(s.shareTestFlightErrorTitle, s.shareTestFlightErrorBody);
+    });
+  }, [s]);
+
   const onRunSpeedTest = useCallback(() => {
+    const controller = new AbortController();
+    runControllerRef.current = controller;
     setSpeedTestRunning(true);
     setSpeedTestResult(null);
     setSpeedTestError(null);
     (async () => {
       try {
-        const result = await runSpeedTest(AppConfig.TELEMETRY_BROKER_URL);
+        const result = await runSpeedTest(AppConfig.TELEMETRY_BROKER_URL, controller.signal);
+        if (!mountedRef.current) {
+          return;
+        }
         setSpeedTestResult(result);
         try {
           const identity = await OpenRungVpn.getIdentity();
@@ -69,9 +146,20 @@ export function SettingsScreen({ onOpenDebug }: SettingsScreenProps): React.JSX.
           // Telemetry is best-effort; never surfaces in the UI.
         }
       } catch (error) {
+        // A run cancelled by unmount/navigation is not a real failure: don't surface it or report
+        // a bogus speed_test_failed event. Native timeout failures leave this caller signal intact
+        // and therefore still fall through to the structured failure path below.
+        if (controller.signal.aborted || !mountedRef.current) {
+          return;
+        }
         // Mirrors production: message ?: exception simple name for the subtitle,
         // the error type name for the telemetry attribute.
-        const errorType = error instanceof Error ? error.constructor.name || error.name : 'Error';
+        const errorType =
+          error instanceof OpenRungBrokerError
+            ? error.kind
+            : error instanceof Error
+              ? error.constructor.name || error.name
+              : 'Error';
         const message = error instanceof Error ? error.message || errorType : String(error);
         setSpeedTestError(message);
         try {
@@ -85,7 +173,9 @@ export function SettingsScreen({ onOpenDebug }: SettingsScreenProps): React.JSX.
           // Best-effort.
         }
       } finally {
-        setSpeedTestRunning(false);
+        if (mountedRef.current) {
+          setSpeedTestRunning(false);
+        }
       }
     })();
   }, []);
@@ -104,11 +194,43 @@ export function SettingsScreen({ onOpenDebug }: SettingsScreenProps): React.JSX.
       <Text style={styles.title}>{s.settingsTitle}</Text>
 
       <Text style={styles.sectionHeader}>{s.settingsGeneralHeader.toUpperCase()}</Text>
+      {update.tier !== 'none' && update.latestVersion != null ? (
+        // Passive update row: present at every tier above 'none' — for 'available' (routine
+        // releases, and the ceiling for unsigned manifests) it is the ONLY update UI.
+        <SettingPanel
+          title={s.updateSettingTitle}
+          subtitle={s.updateSettingSubtitle(APP_VERSION, update.latestVersion)}
+          onPress={onOpenUpdate}
+        />
+      ) : null}
       <SettingPanel
         title={s.languageSettingTitle}
         subtitle={s.languageSettingSubtitle}
         trailing={<LanguagePicker />}
       />
+      <SettingPanel
+        title={s.splitTunnelSettingTitle}
+        subtitle={
+          splitTunnel.enabled
+            ? s.splitTunnelSettingSubtitleOn
+            : s.splitTunnelSettingSubtitleOff
+        }
+        onPress={onOpenSplitTunneling}
+      />
+      {isApkShareAvailable ? (
+        <SettingPanel
+          title={s.shareApkTitle}
+          subtitle={s.shareApkSubtitle}
+          onPress={onShareApk}
+        />
+      ) : null}
+      {isTestFlightShareAvailable ? (
+        <SettingPanel
+          title={s.shareTestFlightTitle}
+          subtitle={s.shareTestFlightSubtitle}
+          onPress={onShareTestFlight}
+        />
+      ) : null}
 
       <Text style={styles.sectionHeader}>{s.settingsDiagnosticsHeader.toUpperCase()}</Text>
       <SettingPanel

@@ -1,18 +1,26 @@
 /**
  * OpenRung mobile app root. Three bottom tabs (Home / Settings / About us)
- * over a plain state machine — no nav library, screens swap instantly. The
- * home screen (full-screen map) stays mounted underneath the other tabs so
- * the MapLibre view keeps its camera/tiles across tab switches; Settings and
- * About render as opaque overlays above it. Deep screens (debug console,
- * licenses, license full text) push over everything including the tab bar,
- * with hardware back mapped exactly like their in-header back arrows:
- * LICENSE_TEXT -> LICENSES -> ABOUT, DEBUG -> SETTINGS, any tab -> HOME,
- * HOME -> system default (exit).
+ * over a plain state machine — no nav library, screens swap instantly.
+ *
+ * iOS renders the tabs through the system TabView (NativeTabs), so the bar is
+ * the real native one — Liquid Glass on iOS 26+ — and the native tab
+ * controller keeps the home map mounted across switches. Android keeps the
+ * custom JS TabBar: the home screen (full-screen map) stays mounted
+ * underneath the other tabs so the MapLibre view keeps its camera/tiles, and
+ * Settings/About render as opaque overlays above it.
+ *
+ * On both platforms, deep screens (debug console, split tunneling, licenses,
+ * license full text) push over everything including the tab bar, with
+ * hardware back mapped exactly like their in-header back arrows:
+ * LICENSE_TEXT -> LICENSES -> ABOUT, DEBUG -> SETTINGS,
+ * SPLIT_TUNNELING -> SETTINGS, any tab -> HOME, HOME -> system default
+ * (exit).
  */
 import React, { useCallback, useEffect, useState } from 'react';
-import { BackHandler, StatusBar, StyleSheet, View } from 'react-native';
+import { AppState, BackHandler, Platform, StatusBar, StyleSheet, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
+import { NativeTabs } from './src/components/NativeTabs';
 import { TabBar, type AppTab } from './src/components/TabBar';
 import { LanguageProvider } from './src/i18n';
 import { AboutScreen } from './src/screens/AboutScreen';
@@ -21,12 +29,44 @@ import { LicenseTextScreen } from './src/screens/LicenseTextScreen';
 import { LicensesScreen } from './src/screens/LicensesScreen';
 import { MainScreen } from './src/screens/MainScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
+import { SplitTunnelingScreen } from './src/screens/SplitTunnelingScreen';
+import { UpdateRequiredScreen } from './src/screens/UpdateRequiredScreen';
+import {
+  initializeSplitTunnel,
+  refreshSplitTunnelRegion,
+  useAppSelector,
+} from './src/state/store';
+import { startUpdateCheck } from './src/state/updateCheck';
 import { palette } from './src/theme';
 
 /** Screens pushed over the tabs (each has its own back arrow). */
-type SubRoute = 'DEBUG' | 'LICENSES' | 'LICENSE_TEXT' | null;
+type SubRoute = 'DEBUG' | 'SPLIT_TUNNELING' | 'LICENSES' | 'LICENSE_TEXT' | null;
 
 function App(): React.JSX.Element {
+  // Kick off the fail-open update check (hydrate + throttled fetch + foreground re-checks).
+  // It never gates rendering: the manifest only ever changes what AppRoutes shows.
+  useEffect(() => startUpdateCheck(), []);
+
+  // Publish this session's split-tunnel default at launch (not only when the sub-screen mounts):
+  // selections are session-scoped, so native may still be routing the PREVIOUS session's choice
+  // until this push lands, and the Settings row must describe what native actually applies —
+  // misreporting the leak surface is not acceptable in a censorship-circumvention app.
+  useEffect(() => {
+    // initializeSplitTunnel is best-effort and never rejects.
+    initializeSplitTunnel();
+    // The launch default already reflects the device region, but this JS process routinely
+    // outlives a flight: suspended in Shanghai, resumed in Berlin with the same module state.
+    // Re-check on every foreground so an automatically chosen preset cannot stay behind and keep
+    // a whole country's domains on the direct path. Synchronous, and a no-op unless the device
+    // actually moved.
+    const subscription = AppState.addEventListener('change', status => {
+      if (status === 'active') {
+        refreshSplitTunnelRegion();
+      }
+    });
+    return () => subscription.remove();
+  }, []);
+
   return (
     <SafeAreaProvider>
       <LanguageProvider>
@@ -40,6 +80,9 @@ function App(): React.JSX.Element {
 function AppRoutes(): React.JSX.Element {
   const [tab, setTab] = useState<AppTab>('home');
   const [subRoute, setSubRoute] = useState<SubRoute>(null);
+  // Selector, not the whole store: AppRoutes sits above every screen, so re-rendering it on
+  // each native event (log lines during connect) would cascade through the entire tree.
+  const update = useAppSelector(current => current.update);
 
   const goBack = useCallback((): boolean => {
     if (subRoute === 'LICENSE_TEXT') {
@@ -72,6 +115,9 @@ function AppRoutes(): React.JSX.Element {
     case 'DEBUG':
       subScreen = <DebugScreen onBack={() => setSubRoute(null)} />;
       break;
+    case 'SPLIT_TUNNELING':
+      subScreen = <SplitTunnelingScreen onBack={() => setSubRoute(null)} />;
+      break;
     case 'LICENSES':
       subScreen = (
         <LicensesScreen
@@ -87,28 +133,67 @@ function AppRoutes(): React.JSX.Element {
       break;
   }
 
+  const renderScene = useCallback(
+    (scene: AppTab): React.JSX.Element => (
+      <View style={styles.scene}>
+        {scene === 'home' ? (
+          <MainScreen />
+        ) : scene === 'settings' ? (
+          <SettingsScreen
+            onOpenDebug={() => setSubRoute('DEBUG')}
+            onOpenSplitTunneling={() => setSubRoute('SPLIT_TUNNELING')}
+          />
+        ) : (
+          <AboutScreen onOpenLicenses={() => setSubRoute('LICENSES')} />
+        )}
+      </View>
+    ),
+    [],
+  );
+
   return (
     <View style={styles.root}>
-      {/* Home stays mounted so the map keeps its camera and loaded tiles. */}
-      <MainScreen />
-      {tab === 'settings' ? (
-        <View style={styles.tabOverlay}>
-          <SettingsScreen onOpenDebug={() => setSubRoute('DEBUG')} />
-        </View>
-      ) : null}
-      {tab === 'about' ? (
-        <View style={styles.tabOverlay}>
-          <AboutScreen onOpenLicenses={() => setSubRoute('LICENSES')} />
-        </View>
-      ) : null}
-      <TabBar active={tab} onSelect={onSelectTab} />
+      {Platform.OS === 'ios' ? (
+        <NativeTabs active={tab} onSelect={onSelectTab} renderScene={renderScene} />
+      ) : (
+        <>
+          {/* Home stays mounted so the map keeps its camera and loaded tiles. */}
+          <MainScreen />
+          {tab === 'settings' ? (
+            <View style={styles.tabOverlay}>
+              <SettingsScreen
+                onOpenDebug={() => setSubRoute('DEBUG')}
+                onOpenSplitTunneling={() => setSubRoute('SPLIT_TUNNELING')}
+              />
+            </View>
+          ) : null}
+          {tab === 'about' ? (
+            <View style={styles.tabOverlay}>
+              <AboutScreen onOpenLicenses={() => setSubRoute('LICENSES')} />
+            </View>
+          ) : null}
+          <TabBar active={tab} onSelect={onSelectTab} />
+        </>
+      )}
       {subScreen != null ? <View style={styles.subOverlay}>{subScreen}</View> : null}
+      {update.tier === 'blocked' ? (
+        // Verified-manifest kill switch: covers everything including the tab bar. Hardware back
+        // keeps its normal behaviour underneath (worst case it exits the app — that's not a
+        // bypass); "Continue anyway" on the screen is the sanctioned way past it.
+        <View style={styles.subOverlay}>
+          <UpdateRequiredScreen />
+        </View>
+      ) : null}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   root: {
+    flex: 1,
+    backgroundColor: palette.screen,
+  },
+  scene: {
     flex: 1,
     backgroundColor: palette.screen,
   },

@@ -1,0 +1,489 @@
+#!/usr/bin/env bash
+# Builds the Android sing-box/libbox AAR (android/app/libs/libbox.aar) from the
+# exact sing-box revision pinned in ../SINGBOX_VERSION, with OpenRung's committed
+# native bindings (android/punchbridge) injected into the same gomobile
+# package/runtime on top of the pinned brokerapi, connectcore, punchcore, and
+# wsscore modules. libbox is GPL-3.0, so the sing-box pin, android/punchbridge,
+# and all four OpenRung module pins together are the GPL §6 corresponding source
+# for the native Go portion of any released APK (see ../RELEASE.md).
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
+sing_box_version="$(tr -d '[:space:]' < "$repo_root/SINGBOX_VERSION")"
+work_dir="$(mktemp -d "${TMPDIR:-/tmp}/openrung-sing-box-release.XXXXXX")"
+punch_source="$script_dir/punchbridge"
+trap 'rm -rf "$work_dir"' EXIT
+
+export ANDROID_HOME="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
+export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_HOME/ndk/29.0.14206865}"
+export JAVA_HOME="${JAVA_HOME:-/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home}"
+export PATH="$HOME/go/bin:/opt/homebrew/bin:/opt/homebrew/opt/openjdk@17/bin:$PATH"
+
+# Read the shared-module pins from punchbridge's go.mod without loading the
+# graph (the graph would need each tag to be fetchable, which pre-tag dev
+# breaks).
+punchcore_version="$(go mod edit -json "$punch_source/go.mod" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+for require in data.get("Require") or []:
+    if require["Path"] == "github.com/happytrudy/openrung/punchcore":
+        print(require["Version"])
+        break
+')"
+if [ -z "$punchcore_version" ]; then
+  echo "error: $punch_source/go.mod has no require for github.com/happytrudy/openrung/punchcore" >&2
+  exit 1
+fi
+
+wsscore_version="$(go mod edit -json "$punch_source/go.mod" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+for require in data.get("Require") or []:
+    if require["Path"] == "github.com/happytrudy/openrung/wsscore":
+        print(require["Version"])
+        break
+')"
+if [ -z "$wsscore_version" ]; then
+  echo "error: $punch_source/go.mod has no require for github.com/happytrudy/openrung/wsscore" >&2
+  exit 1
+fi
+
+brokerapi_version="$(go mod edit -json "$punch_source/go.mod" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+for require in data.get("Require") or []:
+    if require["Path"] == "github.com/happytrudy/openrung/brokerapi":
+        print(require["Version"])
+        break
+')"
+if [ -z "$brokerapi_version" ]; then
+  echo "error: $punch_source/go.mod has no require for github.com/happytrudy/openrung/brokerapi" >&2
+  exit 1
+fi
+
+connectcore_version="$(go mod edit -json "$punch_source/go.mod" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+for require in data.get("Require") or []:
+    if require["Path"] == "github.com/happytrudy/openrung/connectcore":
+        print(require["Version"])
+        break
+')"
+if [ -z "$connectcore_version" ]; then
+  echo "error: $punch_source/go.mod has no require for github.com/happytrudy/openrung/connectcore" >&2
+  exit 1
+fi
+
+dev_workspace=""
+if [ -n "${PUNCHCORE_SRC:-}" ] || [ -n "${WSSCORE_SRC:-}" ] || [ -n "${BROKERAPI_SRC:-}" ] || [ -n "${CONNECTCORE_SRC:-}" ]; then
+  # Dev mode resolves any shared module from a local checkout. Tests and
+  # the graft use this explicit workspace so an ambient go.work can never make
+  # the tested trees differ from the trees shipped in the AAR.
+  if [ -n "${PUNCHCORE_SRC:-}" ]; then
+    PUNCHCORE_SRC="$(cd "$PUNCHCORE_SRC" && pwd)"
+  fi
+  if [ -n "${WSSCORE_SRC:-}" ]; then
+    WSSCORE_SRC="$(cd "$WSSCORE_SRC" && pwd)"
+  fi
+  if [ -n "${BROKERAPI_SRC:-}" ]; then
+    BROKERAPI_SRC="$(cd "$BROKERAPI_SRC" && pwd)"
+  fi
+  if [ -n "${CONNECTCORE_SRC:-}" ]; then
+    CONNECTCORE_SRC="$(cd "$CONNECTCORE_SRC" && pwd)"
+  fi
+  dev_workspace="$work_dir/openrung-core-dev.work"
+  {
+    echo "go 1.25.0"
+    echo
+    echo "use $punch_source"
+    if [ -n "${PUNCHCORE_SRC:-}" ]; then
+      echo
+      echo "replace github.com/happytrudy/openrung/punchcore => $PUNCHCORE_SRC"
+    fi
+    if [ -n "${WSSCORE_SRC:-}" ]; then
+      echo
+      echo "replace github.com/happytrudy/openrung/wsscore => $WSSCORE_SRC"
+    fi
+    if [ -n "${BROKERAPI_SRC:-}" ]; then
+      echo
+      echo "replace github.com/happytrudy/openrung/brokerapi => $BROKERAPI_SRC"
+    fi
+    if [ -n "${CONNECTCORE_SRC:-}" ]; then
+      echo
+      echo "replace github.com/happytrudy/openrung/connectcore => $CONNECTCORE_SRC"
+    fi
+  } > "$dev_workspace"
+fi
+
+echo "Testing the OpenRung native bindings"
+(
+  cd "$punch_source"
+  if [ -n "$dev_workspace" ]; then
+    # Dev mode: test through the explicit workspace so the tested shared
+    # modules exactly match the trees the graft will build.
+    GOWORK="$dev_workspace" go test ./...
+  else
+    # Release mode: force workspace mode off so a stray developer go.work can
+    # never make tested code differ from any pinned shared module.
+    GOWORK=off go test ./...
+  fi
+)
+
+echo "Building libbox.aar from sing-box $sing_box_version with OpenRung native transports"
+
+cd "$script_dir"
+
+module_cache="${GOMODCACHE:-$(go env GOMODCACHE)}"
+module_source="$module_cache/github.com/sagernet/sing-box@$sing_box_version"
+
+GOMODCACHE="$module_cache" go mod download "github.com/sagernet/sing-box@$sing_box_version"
+cp -R "$module_source" "$work_dir/source"
+chmod -R u+w "$work_dir/source"
+
+# --- OpenRung app-size trim -------------------------------------------------
+# Drop sing-box features OpenRung never uses (Tailscale, WireGuard, naiveproxy)
+# from the libbox build so their Go trees are not statically linked into the
+# shipped binary. OpenRung emits only vless/direct/block outbounds (see
+# net/SingBoxConfiguration), and each dropped feature has a //go:build !<tag>
+# stub in sing-box include/, so the build still compiles and the protocol just
+# reports "not included" at runtime. This patches ONLY the tag literals in
+# sing-box's own build helper, leaving every other flag it sets (-trimpath,
+# -ldflags "-s -w ... constant.Version=…", -javapkg, -androidapi, the JDK/SDK
+# checks) byte-for-byte identical. Assert-then-replace: if a SINGBOX_VERSION
+# bump reshuffles these exact tag literals the build fails here, forcing the tag
+# set to be re-reviewed rather than silently reverting. Keeps with_gvisor and
+# with_quic for now (see RELEASE.md §2 / the size-trim plan).
+python3 - "$work_dir/source/cmd/internal/build_libbox/main.go" <<'PATCH_TAGS'
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as handle:
+    lines = handle.readlines()
+
+patched_shared = False
+removed_tailscale = False
+out = []
+for line in lines:
+    stripped = line.strip()
+    if stripped.startswith('sharedTags = append(sharedTags, "with_gvisor"'):
+        if '"with_wireguard"' not in stripped or '"with_naive_outbound"' not in stripped:
+            sys.exit(
+                "error: build_libbox sharedTags line changed for this "
+                "SINGBOX_VERSION; re-review OpenRung's libbox tag trim.\nsaw: "
+                + stripped
+            )
+        line = line.replace('"with_wireguard", ', "").replace(
+            '"with_naive_outbound", ', ""
+        )
+        patched_shared = True
+    elif stripped.startswith('sharedTags = append(sharedTags, "with_tailscale"'):
+        removed_tailscale = True
+        continue  # drop the whole Tailscale append line
+    out.append(line)
+
+if not patched_shared or not removed_tailscale:
+    sys.exit(
+        "error: build_libbox tag lines not found for this SINGBOX_VERSION "
+        "(shared=%s tailscale=%s); re-review OpenRung's libbox tag trim."
+        % (patched_shared, removed_tailscale)
+    )
+
+with open(path, "w", encoding="utf-8") as handle:
+    handle.writelines(out)
+
+print(
+    "openrung: trimmed libbox build tags "
+    "(dropped with_tailscale, with_wireguard, with_naive_outbound)"
+)
+PATCH_TAGS
+# ---------------------------------------------------------------------------
+
+# --- OpenRung app-size trim (part 2): unlink the Tailscale closure -----------
+# The tag trim above is not enough to drop tailscale.com from the binary:
+# libbox's native_shell_session.go is gated only by OS (linux||android||darwin
+# ||ios) and imports protocol/tailscale/tailssh, whose files build under
+# with_gvisor — NOT with_tailscale. Keeping with_gvisor therefore re-links the
+# entire Tailscale module (magicsock, DERP, gliderssh, embedded wireguard-go),
+# measured ~12 MB per binary. OpenRung never exposes NativeShellSession (no
+# Kotlin/Swift callers), and sing-box already ships a stub
+# (native_shell_session_stub.go) whose methods report "not supported". Swap the
+# two files' build tags so the stub always compiles and the tailssh importer
+# never does — the datapath tags (with_gvisor, with_quic) stay untouched.
+# Assert-then-replace, same tripwire contract as the tag patch above.
+python3 - "$work_dir/source/experimental/libbox" <<'PATCH_SHELL_SESSION'
+import os
+import sys
+
+root = sys.argv[1]
+swaps = [
+    (
+        "native_shell_session.go",
+        "//go:build linux || android || darwin || ios",
+        "//go:build openrung_never",
+    ),
+    (
+        "native_shell_session_stub.go",
+        "//go:build !linux && !android && !darwin && !ios",
+        "//go:build !openrung_never",
+    ),
+]
+for name, old, new in swaps:
+    path = os.path.join(root, name)
+    with open(path, "r", encoding="utf-8") as handle:
+        text = handle.read()
+    if old + "\n" not in text:
+        sys.exit(
+            "error: %s build tag changed for this SINGBOX_VERSION; re-review "
+            "OpenRung's Tailscale shell-session stub swap.\nexpected: %s"
+            % (name, old)
+        )
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text.replace(old + "\n", new + "\n", 1))
+
+print(
+    "openrung: stubbed libbox native shell session "
+    "(unlinks tailscale.com/tailssh from the with_gvisor build)"
+)
+PATCH_SHELL_SESSION
+# ---------------------------------------------------------------------------
+
+# gomobile applications must use a single generated Go runtime. A standalone
+# punchbridge.aar would duplicate go.Seq/go.Universe and its native runtime next
+# to libbox.aar, so merge the bindings (and the sagernet-QUIC session layer)
+# into sing-box's existing experimental/libbox package before its normal build
+# command runs. Shared transport and policy implementations are NOT copied:
+# brokerapi, connectcore, punchcore, and wsscore resolve from their pinned
+# modules. Tests are excluded from the graft.
+cp "$punch_source/binding.go" "$work_dir/source/experimental/libbox/openrung_punch.go"
+cp "$punch_source/wss_binding.go" "$work_dir/source/experimental/libbox/openrung_wss.go"
+cp "$punch_source/broker_binding.go" "$work_dir/source/experimental/libbox/openrung_broker.go"
+cp "$punch_source/failure_binding.go" "$work_dir/source/experimental/libbox/openrung_failure.go"
+cp "$punch_source/singbox_binding.go" "$work_dir/source/experimental/libbox/openrung_singbox.go"
+cp "$punch_source/telemetry_binding.go" "$work_dir/source/experimental/libbox/openrung_telemetry.go"
+# The engine binding graft (file list, build-constraint guard, app-version
+# generator) is shared with the other platform's release script.
+bash "$repo_root/scripts/graft-engine-binding.sh" "$punch_source" \
+  "$work_dir/source/experimental/libbox" "$repo_root/package.json"
+
+mkdir -p "$work_dir/source/experimental/libbox/internal/openrungpunch"
+for source_file in "$punch_source/internal/openrungpunch/"*.go; do
+  case "$source_file" in
+    *_test.go) continue ;;
+  esac
+  cp "$source_file" "$work_dir/source/experimental/libbox/internal/openrungpunch/"
+done
+
+(
+  cd "$work_dir/source"
+  go_mod_edits=(
+    -require "github.com/happytrudy/openrung/brokerapi@$brokerapi_version"
+    -require "github.com/happytrudy/openrung/connectcore@$connectcore_version"
+    -require "github.com/happytrudy/openrung/punchcore@$punchcore_version"
+    -require "github.com/happytrudy/openrung/wsscore@$wsscore_version"
+  )
+  if [ -n "${BROKERAPI_SRC:-}" ]; then
+    go_mod_edits+=(
+      -replace "github.com/happytrudy/openrung/brokerapi=$BROKERAPI_SRC"
+    )
+  fi
+  if [ -n "${CONNECTCORE_SRC:-}" ]; then
+    go_mod_edits+=(
+      -replace "github.com/happytrudy/openrung/connectcore=$CONNECTCORE_SRC"
+    )
+  fi
+  if [ -n "${PUNCHCORE_SRC:-}" ]; then
+    go_mod_edits+=(
+      -replace "github.com/happytrudy/openrung/punchcore=$PUNCHCORE_SRC"
+    )
+  fi
+  if [ -n "${WSSCORE_SRC:-}" ]; then
+    go_mod_edits+=(
+      -replace "github.com/happytrudy/openrung/wsscore=$WSSCORE_SRC"
+    )
+  fi
+
+  if [ -n "$dev_workspace" ]; then
+    echo "==============================================================" >&2
+    echo "WARNING: building with local OpenRung shared-module source." >&2
+    if [ -n "${PUNCHCORE_SRC:-}" ]; then
+      echo "PUNCHCORE_SRC: $PUNCHCORE_SRC" >&2
+    fi
+    if [ -n "${WSSCORE_SRC:-}" ]; then
+      echo "WSSCORE_SRC: $WSSCORE_SRC" >&2
+    fi
+    if [ -n "${BROKERAPI_SRC:-}" ]; then
+      echo "BROKERAPI_SRC: $BROKERAPI_SRC" >&2
+    fi
+    if [ -n "${CONNECTCORE_SRC:-}" ]; then
+      echo "CONNECTCORE_SRC: $CONNECTCORE_SRC" >&2
+    fi
+    echo "This is for development only. Release AARs must resolve" >&2
+    echo "all versions pinned in android/punchbridge/go.mod." >&2
+    echo "==============================================================" >&2
+  fi
+
+  GOWORK=off go mod edit "${go_mod_edits[@]}"
+  # Resolve all exact pins without `go mod tidy`, which would rewrite
+  # unrelated sing-box requirements. go get also records the full module sums
+  # required by gomobile's read-only build; any directory replaces above remain
+  # authoritative for development builds.
+  GOFLAGS=-mod=mod GOMODCACHE="$module_cache" GOWORK=off \
+    go get \
+      "github.com/happytrudy/openrung/brokerapi@$brokerapi_version" \
+      "github.com/happytrudy/openrung/connectcore@$connectcore_version" \
+      "github.com/happytrudy/openrung/punchcore@$punchcore_version" \
+      "github.com/happytrudy/openrung/wsscore@$wsscore_version"
+  # GOWORK=off so a developer go.work can never leak into the graft build.
+  # Build one AAR with all four React Native release ABIs: armeabi-v7a,
+  # arm64-v8a, x86, and x86_64. The previous arm64-only target was too narrow
+  # for the app's declared reactNativeArchitectures set.
+  # Match upstream build_libbox: oomprofile uses runtime linknames on Linux.
+  GOMODCACHE="$module_cache" GOWORK=off \
+    go test -race -ldflags=-checklinkname=0 -tags with_gvisor,with_quic,with_clash_api ./experimental/libbox -run TestOpenRungLibbox
+  GOMODCACHE="$module_cache" GOWORK=off go run ./cmd/internal/build_libbox \
+    -target android \
+    -platform android
+)
+
+aar="$work_dir/source/libbox.aar"
+classes_jar="$work_dir/libbox-classes.jar"
+python3 - "$aar" "$classes_jar" <<'CHECK_AAR'
+import sys
+import zipfile
+
+aar_path, classes_path = sys.argv[1:]
+required_classes = [
+    "io/nekohasekai/libbox/OpenRungEngine.class",
+    "io/nekohasekai/libbox/OpenRungEngineListener.class",
+    "io/nekohasekai/libbox/OpenRungMobileHost.class",
+    "io/nekohasekai/libbox/OpenRungMobileRun.class",
+    "io/nekohasekai/libbox/OpenRungRunTelemetry.class",
+    "io/nekohasekai/libbox/OpenRungEngineOperation.class",
+    "io/nekohasekai/libbox/OpenRungBrokerOperation.class",
+    "io/nekohasekai/libbox/OpenRungBrokerResult.class",
+    "io/nekohasekai/libbox/OpenRungBrokerRelayResult.class",
+    "io/nekohasekai/libbox/OpenRungBrokerSpeedTestResult.class",
+    "io/nekohasekai/libbox/OpenRungBrokerManifestResult.class",
+    "io/nekohasekai/libbox/OpenRungBrokerWSSTicketResult.class",
+    "io/nekohasekai/libbox/OpenRungSingBoxConfigResult.class",
+    "io/nekohasekai/libbox/OpenRungTelemetryOutbox.class",
+    "io/nekohasekai/libbox/OpenRungTelemetryUpload.class",
+    "io/nekohasekai/libbox/OpenRungTelemetryFlushResult.class",
+]
+required_native_libraries = [
+    "jni/armeabi-v7a/libbox.so",
+    "jni/arm64-v8a/libbox.so",
+    "jni/x86/libbox.so",
+    "jni/x86_64/libbox.so",
+]
+with zipfile.ZipFile(aar_path) as aar_file:
+    aar_entries = set(aar_file.namelist())
+    if "classes.jar" not in aar_entries:
+        sys.exit("error: libbox AAR is missing classes.jar")
+    with open(classes_path, "wb") as output:
+        output.write(aar_file.read("classes.jar"))
+    for entry in required_native_libraries:
+        if entry not in aar_entries:
+            sys.exit("error: libbox AAR is missing " + entry)
+
+with zipfile.ZipFile(classes_path) as classes_file:
+    class_entries = set(classes_file.namelist())
+    for entry in required_classes:
+        if entry not in class_entries:
+            sys.exit("error: libbox classes.jar is missing " + entry)
+CHECK_AAR
+
+javap_output="$(
+  "$JAVA_HOME/bin/javap" -classpath "$classes_jar" \
+    io.nekohasekai.libbox.Libbox \
+    io.nekohasekai.libbox.OpenRungEngine \
+    io.nekohasekai.libbox.OpenRungEngineListener \
+    io.nekohasekai.libbox.OpenRungMobileHost \
+    io.nekohasekai.libbox.OpenRungMobileRun \
+    io.nekohasekai.libbox.OpenRungRunTelemetry \
+    io.nekohasekai.libbox.OpenRungEngineOperation \
+    io.nekohasekai.libbox.OpenRungBrokerOperation \
+    io.nekohasekai.libbox.OpenRungBrokerResult \
+    io.nekohasekai.libbox.OpenRungBrokerRelayResult \
+    io.nekohasekai.libbox.OpenRungBrokerSpeedTestResult \
+    io.nekohasekai.libbox.OpenRungBrokerManifestResult \
+    io.nekohasekai.libbox.OpenRungBrokerWSSTicketResult \
+    io.nekohasekai.libbox.OpenRungSingBoxConfigResult \
+    io.nekohasekai.libbox.OpenRungTelemetryOutbox \
+    io.nekohasekai.libbox.OpenRungTelemetryUpload \
+    io.nekohasekai.libbox.OpenRungTelemetryFlushResult
+)"
+# Every entry below must be a symbol a Kotlin/Swift/React Native call site actually links. Pinning
+# an unconsumed binding method here gates releases on surface nothing uses — `downloadSpeedTest`
+# was pinned that way and removed; only `runSpeedTest` (brokerapi's warmup + measurement flow) has
+# a caller. Add a symbol here when you add its call site, not before.
+# B1's engine API is linked by the native ABI smoke tests before B2/B3 cutover.
+for generated_symbol in \
+  'newOpenRungEngineForAndroid(java.lang.String, io.nekohasekai.libbox.PlatformInterface, io.nekohasekai.libbox.OpenRungWSSProtector, io.nekohasekai.libbox.OpenRungEngineListener) throws java.lang.Exception;' \
+  'newOpenRungEngineForIOS(java.lang.String, io.nekohasekai.libbox.PlatformInterface, io.nekohasekai.libbox.OpenRungEngineListener) throws java.lang.Exception;' \
+  'start(java.lang.String, java.lang.String, java.lang.String) throws java.lang.Exception;' \
+  'disconnect() throws java.lang.Exception;' \
+  'stop(long) throws java.lang.Exception;' \
+  'pause();' \
+  'resume();' \
+  'networkChanged(boolean, java.lang.String, java.lang.String) throws java.lang.Exception;' \
+  'stateJSON();' \
+  'teardownComplete();' \
+  'newOpenRungMobileEngineForIOS(java.lang.String, io.nekohasekai.libbox.OpenRungMobileHost, io.nekohasekai.libbox.OpenRungEngineListener) throws java.lang.Exception;' \
+  'newOpenRungMobileEngineForAndroid(java.lang.String, io.nekohasekai.libbox.OpenRungWSSProtector, io.nekohasekai.libbox.OpenRungMobileHost, io.nekohasekai.libbox.OpenRungEngineListener) throws java.lang.Exception;' \
+  'openRungTunName(int) throws java.lang.Exception;' \
+  'settingsJSON() throws java.lang.Exception;' \
+  'attributesJSON();' \
+  'newRun(io.nekohasekai.libbox.OpenRungRunTelemetry) throws java.lang.Exception;' \
+  'platform();' \
+  'waitReady(io.nekohasekai.libbox.OpenRungEngineOperation) throws java.lang.Exception;' \
+  'verifyPath(io.nekohasekai.libbox.OpenRungEngineOperation, java.lang.String);' \
+  'close() throws java.lang.Exception;' \
+  'recordApplicationConnections(java.lang.String, int, long);' \
+  'isCancelled();' \
+  'onEvent(java.lang.String);' \
+  'newOpenRungBrokerOperationForAndroid(java.lang.String, java.lang.String);' \
+  'newOpenRungBrokerOperationForIOS(java.lang.String, java.lang.String);' \
+  'newOpenRungBrokerOperationForReactNative(java.lang.String, java.lang.String);' \
+  'firstReachable(java.lang.String, int, java.lang.String, java.lang.String);' \
+  'sendTelemetryBatchJSON(java.lang.String, java.lang.String);' \
+  'runSpeedTest(java.lang.String);' \
+  'fetchManifestCandidate(java.lang.String);' \
+  'requestWSSTicket(java.lang.String, java.lang.String, java.lang.String, java.lang.String, java.lang.String);' \
+  'relayJSON();' \
+  'bytes();' \
+  'ttfbMillis();' \
+  'downloadDurationMillis();' \
+  'totalDurationMillis();' \
+  'mbps();' \
+  'bodyJSON();' \
+  'sourceURL();' \
+  'ticket();' \
+  'url();' \
+  'expiresAtMillis();' \
+  'errorKind();' \
+  'httpStatus();' \
+  'retryAfterMillis();' \
+  'openRungClassifyFailure(java.lang.String);' \
+  'openRungFailureDetail(java.lang.String);' \
+  'openRungBuildSingBoxConfig(java.lang.String);' \
+  'configJSON();' \
+  'newOpenRungTelemetryOutboxForAndroid(java.lang.String, java.lang.String, java.lang.String, java.lang.String);' \
+  'enqueue(java.lang.String);' \
+  'enqueueBatchJSON(java.lang.String);' \
+  'applySessionAttributes(java.lang.String, java.lang.String);' \
+  'flushNextBatch(java.lang.String);' \
+  'sendHeartbeat(java.lang.String, java.lang.String);' \
+  'beginUpload();' \
+  'close();' \
+  'pendingCount();'; do
+  if ! grep -Fq "$generated_symbol" <<< "$javap_output"; then
+    echo "error: libbox AAR is missing generated broker symbol: $generated_symbol" >&2
+    exit 1
+  fi
+done
+
+mkdir -p "$script_dir/app/libs"
+cp "$aar" "$script_dir/app/libs/libbox.aar"
+echo "Release libbox AAR: $script_dir/app/libs/libbox.aar"

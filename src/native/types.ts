@@ -11,7 +11,9 @@ export type ConnectionStatus =
 
 export interface RecentNode {
   countryCode: string; // ISO 3166-1 alpha-2, uppercase
+  relayId?: string; // exact broker relay id; absent on legacy entries
   label: string; // "City, Country" or country name
+  relayName?: string; // sanitized relay display name (see NativeVpnState.relayName); absent on legacy entries
   latitude: number;
   longitude: number;
 }
@@ -19,9 +21,14 @@ export interface RecentNode {
 export interface NativeVpnState {
   status: ConnectionStatus;
   relayLabel: string | null; // resolved geo label, never a raw IP
+  relayName: string | null; // connected relay's display name — native sanitizes the operator-supplied
+  // label (control/bidi-format chars stripped, whitespace collapsed, ≤24 code points; fallback: sanitized id minus `relay_`, ≤12 code points)
+  relayClass: 'foundation' | 'volunteer' | null; // connected relay's node class — native
+  // normalizes the descriptor's node_class (unknown/absent => 'volunteer'); null whenever
+  // not connected, mirroring relayName's lifecycle
   lastError: string | null;
   logLines: string[]; // "[HH:mm:ss] message", newest last, cap 80
-  recents: RecentNode[]; // newest first, deduped by countryCode, cap 8
+  recents: RecentNode[]; // newest first, deduped by relayId, cap 8
 }
 
 export interface NativeIdentity {
@@ -35,10 +42,23 @@ export interface OpenRungVpnModule {
    *  NETunnelProviderManager and save it). Resolves true when usable. */
   prepare(): Promise<boolean>;
   /** Start (or switch) the tunnel. targetCountry: ISO alpha-2 or null = broker
-   *  picks. Resolves once the native start has been dispatched (NOT when
-   *  connected — completion is reported via events). */
-  connect(brokerUrl: string, targetCountry: string | null): Promise<void>;
+   *  picks. targetRelayId: connect to that exact broker relay id (takes
+   *  precedence over targetCountry) or null. Resolves once the native start
+   *  has been dispatched (NOT when connected — completion is reported via
+   *  events). */
+  connect(
+    brokerUrl: string,
+    targetCountry: string | null,
+    targetRelayId: string | null,
+  ): Promise<void>;
   disconnect(): Promise<void>;
   getState(): Promise<NativeVpnState>;
   getIdentity(): Promise<NativeIdentity>;
+  /** Persist the split-tunnel config JSON (contract §3: snake_case keys
+   *  version/enabled/bypass_lan/bypass_countries/excluded_packages, serialized
+   *  in exactly that order). When the tunnel is active AND the config actually
+   *  changed (string comparison against the stored value), native reapplies by
+   *  reconnecting to the same target. Resolves after persistence + reapply
+   *  dispatch (NOT completion — progress is reported via events). */
+  setSplitTunnelConfig(configJson: string): Promise<void>;
 }

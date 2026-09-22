@@ -46,6 +46,8 @@ export class MockOpenRungVpn implements OpenRungVpnModule {
   private state: NativeVpnState = {
     status: 'disconnected',
     relayLabel: null,
+    relayName: null,
+    relayClass: null,
     lastError: null,
     logLines: [],
     recents: [],
@@ -55,6 +57,7 @@ export class MockOpenRungVpn implements OpenRungVpnModule {
   private timers: Array<ReturnType<typeof setTimeout>> = [];
   private readonly clientId = uuid4();
   private sessionId: string | null = null;
+  private splitTunnelConfigJson: string | null = null;
 
   subscribe(listener: (state: NativeVpnState) => void): () => void {
     this.listeners.add(listener);
@@ -67,19 +70,33 @@ export class MockOpenRungVpn implements OpenRungVpnModule {
     return Promise.resolve(true);
   }
 
-  connect(brokerUrl: string, targetCountry: string | null): Promise<void> {
+  connect(
+    brokerUrl: string,
+    targetCountry: string | null,
+    targetRelayId: string | null = null,
+  ): Promise<void> {
     this.cancelScript();
     this.sessionId = uuid4();
 
     const code = targetCountry ? targetCountry.trim().toUpperCase() : 'JP';
     const countryName = displayName(code) ?? code;
     const geo = centroid(code);
-    // Production shows geo.locationLabel() ("City, Country"); the mock knows a city only for the
-    // default Tokyo relay and falls back to the country name otherwise, like production does.
+    // Production shows the broker-served relay.locationLabel() ("City, Country"); the mock knows
+    // a city only for the default Tokyo relay and falls back to the country name otherwise, like
+    // production does when the broker hasn't sent a city.
     const relayLabel = code === 'JP' ? 'Tokyo, Japan' : countryName;
-    const relayId = `${code.toLowerCase()}-volunteer-1`;
+    const relayId = targetRelayId ?? `${code.toLowerCase()}-relay-1`;
+    // Broker-picked auto connects land on a foundation relay in the mock script; explicitly
+    // chosen relays play a volunteer one, so both badge variants are demoable without native.
+    const relayClass =
+      targetRelayId == null && targetCountry == null ? ('foundation' as const) : ('volunteer' as const);
 
-    this.setStatus('preparing', { relayLabel: null, lastError: null });
+    this.setStatus('preparing', {
+      relayLabel: null,
+      relayName: null,
+      relayClass: null,
+      lastError: null,
+    });
     this.runScript([
       {
         delayMs: 300,
@@ -92,8 +109,10 @@ export class MockOpenRungVpn implements OpenRungVpnModule {
         delayMs: 700,
         run: () => {
           this.appendLog('broker returned 3 relays; 3 usable');
-          if (targetCountry) {
-            this.appendLog(`connecting to a volunteer in ${countryName}`);
+          if (targetRelayId) {
+            this.appendLog(`connecting to relay ${targetRelayId}`);
+          } else if (targetCountry) {
+            this.appendLog(`connecting to a relay in ${countryName}`);
           }
         },
       },
@@ -114,18 +133,26 @@ export class MockOpenRungVpn implements OpenRungVpnModule {
         delayMs: 2300,
         run: () => {
           this.appendLog('internet access verified in 812 ms');
-          this.setStatus('connected', { relayLabel: null, lastError: null });
+          this.setStatus('connected', {
+            relayLabel: null,
+            relayName: relayId,
+            relayClass,
+            lastError: null,
+          });
         },
       },
       {
         delayMs: 2600,
         run: () => {
-          // Production resolves the relay location asynchronously after CONNECTED, then records
-          // the recent node at the curated centroid when the country is known.
+          // Production applies the broker-served relay location right after CONNECTED, then
+          // records the recent node at the curated centroid when the country is known; the mock
+          // keeps a small delay so the label visibly follows the status change.
           this.state = { ...this.state, relayLabel };
           this.recordRecent({
             countryCode: code,
+            relayId,
             label: relayLabel,
+            relayName: relayId,
             latitude: geo?.latitude ?? 0,
             longitude: geo?.longitude ?? 0,
           });
@@ -144,7 +171,12 @@ export class MockOpenRungVpn implements OpenRungVpnModule {
         delayMs: 300,
         run: () => {
           this.sessionId = null;
-          this.setStatus('disconnected', { relayLabel: null, lastError: null });
+          this.setStatus('disconnected', {
+            relayLabel: null,
+            relayName: null,
+            relayClass: null,
+            lastError: null,
+          });
         },
       },
     ]);
@@ -153,6 +185,32 @@ export class MockOpenRungVpn implements OpenRungVpnModule {
 
   getState(): Promise<NativeVpnState> {
     return Promise.resolve(this.snapshot());
+  }
+
+  setSplitTunnelConfig(configJson: string): Promise<void> {
+    // Production stores the raw JSON and skips the reapply-reconnect when the incoming payload
+    // is string-equal to the stored one (contract §3); the mock mirrors that comparison.
+    const changed = configJson !== this.splitTunnelConfigJson;
+    this.splitTunnelConfigJson = configJson;
+    if (changed && this.state.status === 'connected') {
+      // Production reapplies by tearing down + reconnecting to the SAME target, which re-stamps
+      // the same relay identity on the new CONNECTED; the mock walks a quick
+      // connecting -> connected sequence (so the UI shows the brief reconnect) and carries the
+      // identity across it — CONNECTING auto-clears relayName/relayClass, exactly like native.
+      const { relayName, relayClass } = this.state;
+      this.cancelScript();
+      this.setStatus('connecting');
+      this.appendLog('applying split tunnel config');
+      this.runScript([
+        {
+          delayMs: 400,
+          run: () => {
+            this.setStatus('connected', { relayName, relayClass });
+          },
+        },
+      ]);
+    }
+    return Promise.resolve();
   }
 
   getIdentity(): Promise<NativeIdentity> {
@@ -174,12 +232,29 @@ export class MockOpenRungVpn implements OpenRungVpnModule {
 
   private setStatus(
     status: ConnectionStatus,
-    overrides: { relayLabel?: string | null; lastError?: string | null } = {},
+    overrides: {
+      relayLabel?: string | null;
+      relayName?: string | null;
+      relayClass?: NativeVpnState['relayClass'];
+      lastError?: string | null;
+    } = {},
   ): void {
     this.state = {
       ...this.state,
       status,
       relayLabel: overrides.relayLabel !== undefined ? overrides.relayLabel : this.state.relayLabel,
+      relayName:
+        overrides.relayName !== undefined
+          ? overrides.relayName
+          : status === 'connected'
+            ? this.state.relayName
+            : null,
+      relayClass:
+        overrides.relayClass !== undefined
+          ? overrides.relayClass
+          : status === 'connected'
+            ? this.state.relayClass
+            : null,
       lastError: overrides.lastError !== undefined ? overrides.lastError : this.state.lastError,
     };
     // Production setStatus appends the (localized) status label as a log line.
@@ -195,7 +270,11 @@ export class MockOpenRungVpn implements OpenRungVpnModule {
   private recordRecent(node: RecentNode): void {
     const recents = [
       node,
-      ...this.state.recents.filter(recent => recent.countryCode !== node.countryCode),
+      ...this.state.recents.filter(
+        recent =>
+          recent.relayId !== node.relayId &&
+          !(!recent.relayId && recent.countryCode === node.countryCode),
+      ),
     ].slice(0, MAX_RECENTS);
     this.state = { ...this.state, recents };
   }

@@ -14,8 +14,6 @@ import java.time.format.DateTimeFormatter
 
 object OpenRungStatusStore {
     private const val KEY_STATUS = "status"
-    private const val KEY_BROKER_URL = "broker_url"
-    private const val KEY_RELAY_LABEL = "relay_label"
     private const val KEY_LAST_ERROR = "last_error"
     private const val KEY_LOG_LINES = "log_lines"
     private const val KEY_RECENT_NODES = "recent_nodes"
@@ -23,7 +21,7 @@ object OpenRungStatusStore {
 
     private val timeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
     private val json = Json { ignoreUnknownKeys = true }
-    private val state = MutableStateFlow(OpenRungUiState(brokerUrl = AppConfig.DEFAULT_BROKER_URL))
+    private val state = MutableStateFlow(OpenRungUiState())
     private var appContext: Context? = null
 
     val uiState: StateFlow<OpenRungUiState> = state.asStateFlow()
@@ -37,18 +35,14 @@ object OpenRungStatusStore {
         }.getOrDefault(ConnectionStatus.DISCONNECTED)
         state.value = OpenRungUiState(
             status = if (restoredStatus == ConnectionStatus.CONNECTED) ConnectionStatus.DISCONNECTED else restoredStatus,
-            brokerUrl = prefs.getString(KEY_BROKER_URL, AppConfig.DEFAULT_BROKER_URL) ?: AppConfig.DEFAULT_BROKER_URL,
-            // A cold start always reconnects fresh, so never restore a stale relay label (would leak a prior relay).
+            // A cold start always reconnects fresh, so never restore stale relay details.
             relayLabel = null,
+            relayName = null,
+            relayClass = null,
             lastError = prefs.getString(KEY_LAST_ERROR, null),
             logLines = prefs.getString(KEY_LOG_LINES, null)?.lines()?.filter { it.isNotBlank() }.orEmpty(),
             recentRegions = loadRecents(prefs.getString(KEY_RECENT_NODES, null)),
         )
-    }
-
-    fun setBrokerUrl(brokerUrl: String) {
-        state.update { it.copy(brokerUrl = brokerUrl) }
-        persist()
     }
 
     /** Updates only the relay label (e.g. resolved geo location) without emitting a status log line. */
@@ -60,12 +54,16 @@ object OpenRungStatusStore {
     fun setStatus(
         status: ConnectionStatus,
         relayLabel: String? = state.value.relayLabel,
+        relayName: String? = if (status == ConnectionStatus.CONNECTED) state.value.relayName else null,
+        relayClass: String? = if (status == ConnectionStatus.CONNECTED) state.value.relayClass else null,
         lastError: String? = state.value.lastError,
     ) {
         state.update {
             it.copy(
                 status = status,
                 relayLabel = relayLabel,
+                relayName = relayName,
+                relayClass = relayClass,
                 lastError = lastError,
             )
         }
@@ -91,6 +89,8 @@ object OpenRungStatusStore {
                 status = ConnectionStatus.FAILED,
                 lastError = message,
                 relayLabel = null,
+                relayName = null,
+                relayClass = null,
                 logLines = (it.logLines + "[${LocalTime.now().format(timeFormatter)}] $logMessage")
                     .takeLast(MAX_LOG_LINES),
             )
@@ -104,12 +104,19 @@ object OpenRungStatusStore {
     }
 
     /**
-     * Records a location the user just connected through so it appears in the "Recents" row.
-     * Deduplicates by country (most recent first) and caps the list to [AppConfig.MAX_RECENTS].
+     * Records a relay the user just connected through so it appears in the "Recents" row.
+     * Deduplicates by relay id (most recent first) and caps the list to [AppConfig.MAX_RECENTS].
+     * A new pinned entry also replaces an unpinned legacy entry from the same country.
      */
     fun recordRecent(node: RecentNode) {
         state.update { current ->
-            val deduped = (listOf(node) + current.recentRegions.filterNot { it.countryCode == node.countryCode })
+            val deduped = (
+                listOf(node) +
+                    current.recentRegions.filterNot { recent ->
+                        recent.relayId == node.relayId ||
+                            (recent.relayId.isBlank() && recent.countryCode == node.countryCode)
+                    }
+                )
                 .take(AppConfig.MAX_RECENTS)
             current.copy(recentRegions = deduped)
         }
@@ -129,8 +136,6 @@ object OpenRungStatusStore {
         context.getSharedPreferences(AppConfig.STATUS_PREFS, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_STATUS, current.status.name)
-            .putString(KEY_BROKER_URL, current.brokerUrl)
-            .putString(KEY_RELAY_LABEL, current.relayLabel)
             .putString(KEY_LAST_ERROR, current.lastError)
             .putString(KEY_LOG_LINES, current.logLines.joinToString("\n"))
             .putString(KEY_RECENT_NODES, json.encodeToString(ListSerializer(RecentNode.serializer()), current.recentRegions))

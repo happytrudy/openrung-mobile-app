@@ -1,44 +1,63 @@
 import Foundation
 
 enum AppConfig {
-    static let vpnProfileName = "OpenRung Volunteer VPN"
-    static let appGroupIdentifier = "group.com.openrung.mobile"
-    static let packetTunnelBundleIdentifier = "com.openrung.mobile.PacketTunnel"
+    static let vpnProfileName = "OpenRung VPN"
+    // Recognized only to adopt an existing pre-rename profile without creating a duplicate.
+    static let legacyVPNProfileName = "OpenRung Volunteer VPN"
+    static let appGroupIdentifier = "group.com.openrung.app"
+    static let packetTunnelBundleIdentifier = "com.openrung.app.PacketTunnel"
     static let providerBrokerURLKey = "broker_url"
     static let providerTargetCountryKey = "target_country"
+    static let providerTargetRelayIDKey = "target_relay_id"
+    /// App-group defaults key holding the raw split-tunnel config JSON (contract §3): written by
+    /// the app's `setSplitTunnelConfig`, read by the extension via `SplitTunnelConfig.load`.
+    static let splitTunnelConfigDefaultsKey = "split_tunnel_config"
 
-    /// Discovery broker (relay-list bootstrap) default. Prefer the HTTPS, Cloudflare-fronted endpoint:
-    /// discovery is the censorship-critical path — it runs BEFORE the VPN tunnel is up — and TLS + CDN
-    /// edge IPs make it costly to block. Falls back to the raw origin IP; see `defaultBrokerURLs`.
+    /// Primary relay-discovery URL passed to brokerapi. The native Go client owns built-in
+    /// candidates, override policy, racing, relay verification, and transport selection; Swift
+    /// receives only the winning URL and a verified relay-list snapshot.
     static let defaultBrokerURL = URL(string: "https://broker.openrung.org/")!
 
-    /// Telemetry / heartbeat / speed-test target: the raw origin IP, NOT the Cloudflare-fronted
-    /// hostname. Heartbeats fire ~once/minute per connected user; routing them through the Cloudflare
-    /// Worker would burn the Workers free-tier quota (100k requests/day). They ride the established VPN
-    /// tunnel so they don't need the CDN front (and it's the same broker either way). Discovery stays
-    /// fronted (low volume, pre-tunnel, needs the resilience); telemetry goes direct (high volume).
-    static let telemetryBrokerURL = URL(string: "http://54.238.185.205:8080/")!
+    /// Bootstrap native VPN telemetry / heartbeat target used until verified relay discovery
+    /// selects a live broker front. The active telemetry session then follows that exact winner,
+    /// so a client that reached discovery through fallback does not post diagnostics back to a
+    /// blocked primary. React Native speed-test telemetry has its own TypeScript route. Never use
+    /// a raw-IP HTTP endpoint: that would expose the user's pre-VPN IP, geo and stable client ID.
+    static let telemetryBrokerURL = URL(string: "https://broker.openrung.org/")!
 
-    /// Ordered discovery candidates, tried in order until one returns relays (see
-    /// `BrokerClient.firstReachable`): the Cloudflare-fronted endpoint first, then the raw IP as a
-    /// fallback so a blocked edge never takes discovery offline. The raw cleartext IP is why
-    /// `NSAllowsArbitraryLoads` is still set.
-    static let defaultBrokerURLs: [URL] = [defaultBrokerURL, telemetryBrokerURL]
+    /// Broker fronts retained for WSS-ticket ordering and other paths that have their own explicit
+    /// policy. Native relay discovery no longer constructs candidates here: brokerapi owns its
+    /// default order, custom-override handling, racing, and relay-list verification.
+    ///
+    /// Two independent fronts are deployed — the Cloudflare Worker and an AWS CloudFront distribution
+    /// (different provider AND DNS zone). Keep this order stable for WSS failover.
+    static let defaultBrokerURLs: [URL] = [
+        defaultBrokerURL,
+        // Independent second front: AWS CloudFront (different provider + DNS zone).
+        URL(string: "https://d2r7mdpyevvs1m.cloudfront.net/")!,
+    ]
 
-    /// Ordered broker candidates for a connection attempt: the caller-selected `primary` (the provider
-    /// configuration's broker, today the default) first, then the built-in `defaultBrokerURLs`,
-    /// de-duplicated while preserving order.
-    static func brokerCandidates(primary: URL?) -> [URL] {
-        BrokerClient.candidates(primary: primary, fallbacks: defaultBrokerURLs)
-    }
-    static let loggingSubsystem = "com.openrung.mobile.PacketTunnel"
+    /// SHA-256 pins for self-signed punch-coordinator leaf certificates, keyed by the exact host in
+    /// the signed relay descriptor. A bare-IP coordinator is accepted only when it appears here;
+    /// hostname coordinators not listed here use Go's normal public-CA and hostname validation.
+    /// The pin authenticates the response that supplies UDP targets, the punch token, and the
+    /// ephemeral QUIC certificate fingerprint.
+    ///
+    /// Rotation: ship a second certificate/endpoint and app pin before switching descriptors. This
+    /// certificate is valid through 2036-06-29 and covers both current RelayHub IPv4 addresses.
+    static let punchCoordinatorCertificateSHA256ByHost: [String: String] = [
+        "43.201.124.63": "70c3a26b9ac7315d1975f417eb9eabbecc98ec0e2d5baadb6c224e87fd99c8b5",
+        "43.201.172.102": "70c3a26b9ac7315d1975f417eb9eabbecc98ec0e2d5baadb6c224e87fd99c8b5",
+    ]
+
+    static let loggingSubsystem = "com.openrung.app.PacketTunnel"
     static let engineDirectoryName = "OpenRungPacketTunnel"
     static let relayLimit = 5
     static let directoryRelayLimit = 20
     static let maxRecents = 8
 
     // App ↔ extension shared-state plumbing.
-    static let darwinNotificationName = "com.openrung.mobile.state-changed"
+    static let darwinNotificationName = "com.openrung.app.state-changed"
     static let telemetryOutboxFilename = "outbox.json"
 
     // Heartbeat cadence (random in this range), matching Android.

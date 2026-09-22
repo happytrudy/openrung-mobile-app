@@ -1,5 +1,7 @@
 import { Platform } from 'react-native';
 
+import type { ConnectionStatus } from './native/types';
+
 /**
  * Terminal-green-on-black palette, hex-for-hex from the production Compose UI
  * (contract §5). ALL text in the app renders in `monoFont`.
@@ -19,8 +21,6 @@ export const palette = {
   dimText: '#7DA989',
   /** Relay line text. */
   relayLine: '#A5F2B5',
-  /** Connect button container when connected or working. */
-  connectedButton: '#B6F579',
   /** Text on green buttons. */
   onGreenText: '#061008',
   /** Console error text. */
@@ -31,28 +31,7 @@ export const palette = {
   chipBackground: '#07110BCC',
   /** FAB container. */
   fabBackground: '#0D1C12',
-  /** FAB content (icon). */
-  fabContent: '#65F58A',
-  /** Map marker stroke / count-label text halo. */
-  markerStroke: '#04140A',
 } as const;
-
-// Individual named exports for convenience (same values as `palette`).
-export const screen = palette.screen;
-export const panel = palette.panel;
-export const borderDim = palette.borderDim;
-export const terminalGreen = palette.terminalGreen;
-export const bodyText = palette.bodyText;
-export const dimText = palette.dimText;
-export const relayLine = palette.relayLine;
-export const connectedButton = palette.connectedButton;
-export const onGreenText = palette.onGreenText;
-export const consoleError = palette.consoleError;
-export const chipFailedText = palette.chipFailedText;
-export const chipBackground = palette.chipBackground;
-export const fabBackground = palette.fabBackground;
-export const fabContent = palette.fabContent;
-export const markerStroke = palette.markerStroke;
 
 /** Every text element is monospace, exactly like the production app. */
 export const monoFont = Platform.select({ ios: 'Menlo', default: 'monospace' });
@@ -76,6 +55,8 @@ export const tokens = {
   glowSoft: 'rgba(101, 245, 138, 0.25)',
   /** Status-dot color while connecting/preparing/disconnecting. */
   working: '#EAF565',
+  /** Volunteer relay-class badge (orange sibling of the neon green/amber family). */
+  volunteer: '#F5A565',
   /** Corner radii. */
   radiusSm: 10,
   radiusMd: 16,
@@ -85,3 +66,22 @@ export const tokens = {
   /** Screen edge padding. */
   edge: 20,
 } as const;
+
+/**
+ * Status-dot colour for live-status readouts (connect card, ocean telemetry):
+ * green when connected, amber while working, red on failure, dim when idle.
+ */
+export function statusDotColor(status: ConnectionStatus): string {
+  switch (status) {
+    case 'connected':
+      return palette.terminalGreen;
+    case 'preparing':
+    case 'connecting':
+    case 'disconnecting':
+      return tokens.working;
+    case 'failed':
+      return palette.consoleError;
+    case 'disconnected':
+      return palette.dimText;
+  }
+}

@@ -1,136 +1,67 @@
 package com.openrung.net
 
-import android.os.Build
-import com.openrung.BuildConfig
-import com.openrung.model.ErrorResponse
 import com.openrung.model.RelayListResponse
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
-import java.io.IOException
-import java.net.HttpURLConnection
-import java.net.URI
-import java.net.URL
-import java.net.URLEncoder
 
-class BrokerClient(
-    private val baseUrl: String,
-    private val json: Json = Json { ignoreUnknownKeys = true },
-) {
-    suspend fun listRelays(
+/** Thin Android adapter over brokerapi's verified, ECH-capable FirstReachable operation. */
+object BrokerClient {
+    /** A verified relay list together with the exact broker front selected by brokerapi. */
+    data class Fetch(val brokerUrl: String, val response: RelayListResponse)
+
+    private val json = Json { ignoreUnknownKeys = true }
+
+    /**
+     * Delegates candidate policy, staggered racing, transport selection, and relay verification to
+     * brokerapi. Optional identity values become empty strings; Go enforces that a non-empty
+     * identity is a complete client/session pair.
+     */
+    suspend fun firstReachable(
+        primary: String,
         limit: Int = 5,
         clientId: String? = null,
         sessionId: String? = null,
-    ): RelayListResponse = withContext(Dispatchers.IO) {
-        val url = URL(relayListUrl(baseUrl, limit))
-        val connection = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 10_000
-            readTimeout = 15_000
-            clientId?.let { setRequestProperty("X-OpenRung-Client-ID", it) }
-            sessionId?.let { setRequestProperty("X-OpenRung-Session-ID", it) }
-            setRequestProperty("X-OpenRung-App-Version", BuildConfig.VERSION_NAME)
-            setRequestProperty("X-OpenRung-Android-API", Build.VERSION.SDK_INT.toString())
+    ): Fetch = firstReachable(
+        primary = primary,
+        limit = limit,
+        clientId = clientId,
+        sessionId = sessionId,
+        operationFactory = NativeBrokerTransport.operationFactory,
+    )
+
+    internal suspend fun firstReachable(
+        primary: String,
+        limit: Int,
+        clientId: String?,
+        sessionId: String?,
+        operationFactory: NativeBrokerOperationFactory,
+        decoder: Json = json,
+    ): Fetch {
+        val native = runNativeBrokerOperation(operationFactory) { operation ->
+            operation.firstReachable(
+                primary = primary,
+                limit = limit,
+                clientId = clientId.orEmpty(),
+                sessionId = sessionId.orEmpty(),
+            )
         }
-
-        try {
-            val status = connection.responseCode
-            val stream = if (status in 200..299) {
-                connection.inputStream
-            } else {
-                connection.errorStream ?: connection.inputStream
-            }
-            val body = stream.bufferedReader().use { it.readText() }
-            if (status !in 200..299) {
-                val apiError = runCatching { json.decodeFromString<ErrorResponse>(body).error }.getOrNull()
-                throw IOException("broker list relays: ${apiError?.ifBlank { null } ?: body.ifBlank { connection.responseMessage }}")
-            }
-            json.decodeFromString<RelayListResponse>(body)
-        } finally {
-            connection.disconnect()
+        val result = requireNativeBrokerSuccess(native, "native broker discovery")
+        if (result.brokerUrl.isBlank()) {
+            throw BrokerNativeFailure(
+                kind = BrokerNativeFailureKind.VALIDATION,
+                message = "native broker discovery returned no winning broker URL",
+            )
         }
-    }
-
-    /** A successful relay fetch together with the broker endpoint that served it. */
-    data class Fetch(val brokerUrl: String, val response: RelayListResponse)
-
-    companion object {
-        /**
-         * Builds the ordered broker candidate list, de-duplicated while preserving order. A non-blank
-         * [primary] is tried FIRST only when it is a genuine override — i.e. not already one of the
-         * [fallbacks]. A persisted value that merely echoes a built-in default must NOT reorder the
-         * defaults' preferred (HTTPS-first) ordering, otherwise an upgrader whose last-used default was
-         * the raw IP would keep hitting the IP before the Cloudflare-fronted endpoint. Pure and
-         * side-effect free so it is unit-testable.
-         */
-        fun candidates(primary: String?, fallbacks: List<String>): List<String> {
-            val ordered = LinkedHashSet<String>()
-            val trimmedPrimary = primary?.trim()?.takeIf { it.isNotEmpty() }
-            if (trimmedPrimary != null && fallbacks.none { it.trim() == trimmedPrimary }) {
-                ordered.add(trimmedPrimary)
-            }
-            fallbacks.forEach { fallback ->
-                fallback.trim().takeIf { it.isNotEmpty() }?.let { ordered.add(it) }
-            }
-            return ordered.toList()
+        val response = try {
+            decoder.decodeFromString<RelayListResponse>(result.relayJson)
+        } catch (_: SerializationException) {
+            // Parser diagnostics can quote the relay payload. Keep the local incompatibility fixed,
+            // typed, and free of response bytes; Go has already selected and verified this winner.
+            throw BrokerNativeFailure(
+                kind = BrokerNativeFailureKind.DECODE,
+                message = "native broker relay JSON is incompatible with the Android model",
+            )
         }
-
-        /**
-         * Fetches relays from each candidate broker in order, returning the first success along with
-         * the endpoint that served it. A blocked or down primary endpoint therefore no longer takes
-         * discovery offline as long as one candidate is reachable. Rethrows cancellation immediately;
-         * if every candidate fails, the last error is rethrown.
-         */
-        suspend fun firstReachable(
-            candidates: List<String>,
-            limit: Int = 5,
-            clientId: String? = null,
-            sessionId: String? = null,
-            json: Json = Json { ignoreUnknownKeys = true },
-        ): Fetch {
-            require(candidates.isNotEmpty()) { "no broker endpoints configured" }
-            var lastError: Throwable? = null
-            for (url in candidates) {
-                try {
-                    val response = BrokerClient(url, json).listRelays(limit, clientId, sessionId)
-                    return Fetch(url, response)
-                } catch (cancellation: CancellationException) {
-                    throw cancellation
-                } catch (error: Throwable) {
-                    lastError = error
-                }
-            }
-            throw lastError ?: IOException("no broker endpoints reachable")
-        }
-
-        fun relayListUrl(baseUrl: String, limit: Int): String {
-            val trimmed = baseUrl.trim()
-            require(trimmed.isNotBlank()) { "broker URL is required" }
-
-            val uri = URI(trimmed)
-            require(!uri.scheme.isNullOrBlank() && !uri.host.isNullOrBlank()) {
-                "broker URL must include scheme and host"
-            }
-
-            val basePath = uri.rawPath.orEmpty().trim('/')
-            val relayPath = listOf(basePath, "api/v1/relays")
-                .filter { it.isNotBlank() }
-                .joinToString(separator = "/", prefix = "/")
-            val safeLimit = if (limit < 1) 5 else limit
-            val query = appendLimit(uri.rawQuery, safeLimit)
-            return URI(uri.scheme, uri.userInfo, uri.host, uri.port, relayPath, query, null).toString()
-        }
-
-        private fun appendLimit(rawQuery: String?, limit: Int): String {
-            val encodedLimit = URLEncoder.encode(limit.toString(), Charsets.UTF_8.name())
-            val existing = rawQuery
-                ?.split("&")
-                ?.filter { it.isNotBlank() }
-                ?.filterNot { it.substringBefore("=") == "limit" }
-                .orEmpty()
-            return (existing + "limit=$encodedLimit")
-                .joinToString("&")
-        }
+        return Fetch(brokerUrl = result.brokerUrl, response = response)
     }
 }

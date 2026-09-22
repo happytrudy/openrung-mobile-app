@@ -1,354 +1,167 @@
 package com.openrung.vpn
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.content.Context
-import android.content.Intent
-import android.net.VpnService
+import android.app.*
+import android.content.*
+import android.net.*
+import android.os.Handler
+import android.os.Looper
 import android.os.Build
-import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import com.openrung.MainActivity
 import com.openrung.R
+import com.openrung.BuildConfig
 import com.openrung.config.AppConfig
-import com.openrung.model.CountryGeo
-import com.openrung.model.RecentNode
-import com.openrung.model.RelayDescriptor
-import com.openrung.model.RelaySelector
-import com.openrung.net.BrokerClient
-import com.openrung.net.ClientGeoInfo
-import com.openrung.net.GeoIpClient
-import com.openrung.net.InternetProbe
-import com.openrung.net.RelayReachability
+import com.openrung.net.SplitTunnelRules
+import com.openrung.net.ProbeTargets
 import com.openrung.net.SingBoxConfiguration
 import com.openrung.state.ConnectionStatus
 import com.openrung.state.OpenRungStatusStore
-import com.openrung.telemetry.TelemetryManager
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlin.random.Random
+import io.nekohasekai.libbox.OpenRungRunTelemetry
+import kotlinx.serialization.json.*
+import java.io.File
 
+/** Android lifecycle and platform mechanics. Connect/recovery policy lives in connectcore. */
 class OpenRungVpnService : VpnService() {
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val relaySelector = RelaySelector()
-    private var connectJob: Job? = null
-    private var heartbeatJob: Job? = null
-    private var engine: ProxyEngine? = null
-    private var brokerUrl: String = AppConfig.DEFAULT_BROKER_URL
-    private var activeRelayId: String? = null
-
+    @Volatile private var lastStartId = -1
+    @Volatile private var observer: EngineNetworkObserver? = null
+    private val runs = java.util.concurrent.CopyOnWriteArraySet<AndroidEngineRun>()
     override fun onCreate() {
         super.onCreate()
         OpenRungStatusStore.initialize(applicationContext)
-        TelemetryManager.initialize(applicationContext)
         createNotificationChannel()
     }
-
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        lastStartId = startId
         when (intent?.action) {
             ACTION_CONNECT -> {
-                val brokerUrl = intent.getStringExtra(EXTRA_BROKER_URL).orEmpty()
-                val targetCountry = intent.getStringExtra(EXTRA_TARGET_COUNTRY)?.takeIf { it.isNotBlank() }
-                heartbeatJob?.cancel()
-                connectJob?.cancel()
-                connectJob = serviceScope.launch {
-                    connect(brokerUrl.ifBlank { AppConfig.DEFAULT_BROKER_URL }, targetCountry)
-                }
+                startForeground(NOTIFICATION_ID, notification(getString(R.string.vpn_notification_preparing)))
+                ConnectcoreProcessHost.connect(this, startId, intent.getStringExtra(EXTRA_BROKER_URL).orEmpty().ifBlank { AppConfig.DEFAULT_BROKER_URL },
+                    intent.getStringExtra(EXTRA_TARGET_COUNTRY), intent.getStringExtra(EXTRA_TARGET_RELAY_ID))
             }
-            ACTION_DISCONNECT -> disconnect()
+            ACTION_REAPPLY -> ConnectcoreProcessHost.reapply(this, startId)
+            ACTION_DISCONNECT -> ConnectcoreProcessHost.stop(this, startId)
+            else -> ConnectcoreProcessHost.stop(this, startId) // killed-process restart never resurrects an unstored target
         }
         return START_STICKY
     }
-
-    override fun onRevoke() {
-        disconnect()
-        super.onRevoke()
-    }
-
+    override fun onRevoke() { ConnectcoreProcessHost.stop(this, lastStartId); super.onRevoke() }
     override fun onDestroy() {
-        disconnect()
-        connectJob?.cancel()
+        ConnectcoreProcessHost.destroyed(this, lastStartId)
         super.onDestroy()
     }
-
-    private suspend fun connect(brokerUrl: String, targetCountry: String? = null) {
-        this.brokerUrl = brokerUrl
-        // Tear down any existing tunnel first so tapping a different location cleanly switches relays.
-        cleanupActiveTunnel()
-        // Telemetry/heartbeat go DIRECT to the origin IP, not the Cloudflare-fronted discovery broker,
-        // so high-frequency heartbeats don't burn the Workers free-tier quota (see AppConfig).
-        val telemetrySession = TelemetryManager.beginSession(applicationContext, AppConfig.TELEMETRY_BROKER_URL)
-        var failureStage = "preparing"
-        TelemetryManager.record("connection_attempted")
-        OpenRungStatusStore.setBrokerUrl(brokerUrl)
-        OpenRungStatusStore.clearError()
-        OpenRungStatusStore.setStatus(ConnectionStatus.PREPARING, relayLabel = null, lastError = null)
-        startForeground(NOTIFICATION_ID, notification(getString(R.string.vpn_notification_preparing)))
-
-        try {
-            OpenRungStatusStore.setStatus(ConnectionStatus.CONNECTING)
-            OpenRungStatusStore.appendLog(getString(R.string.log_fetching_relays, brokerUrl))
-            failureStage = "broker_fetch"
-            val brokerEndpoints = AppConfig.brokerCandidates(brokerUrl)
-            val (fetch, brokerFetchMs) = coroutineScope {
-                val geoLookup = async {
-                    runCatching { GeoIpClient().lookup() }.getOrNull()
-                }
-                val brokerStarted = SystemClock.elapsedRealtime()
-                // When targeting a specific country, fetch the full relay set so that country's
-                // relays are present (the default page may otherwise miss them). Tries each broker
-                // candidate in order so a blocked primary endpoint doesn't take discovery offline.
-                val result = BrokerClient.firstReachable(
-                    candidates = brokerEndpoints,
-                    limit = if (targetCountry != null) AppConfig.DIRECTORY_RELAY_LIMIT else AppConfig.RELAY_LIMIT,
-                    clientId = telemetrySession.clientId,
-                    sessionId = telemetrySession.id,
-                )
-                val elapsed = SystemClock.elapsedRealtime() - brokerStarted
-                geoLookup.await()?.let(TelemetryManager::setGeoInfo)
-                result to elapsed
-            }
-            val relayResponse = fetch.response
-            // If the configured/primary broker was unreachable and a fallback served the list, pin the
-            // rest of this session's broker traffic (telemetry, heartbeats) to the endpoint that worked.
-            // The persisted/configured broker URL is left untouched so a user's custom choice survives.
-            if (fetch.brokerUrl != brokerUrl) {
-                this.brokerUrl = fetch.brokerUrl
-                OpenRungStatusStore.appendLog(getString(R.string.log_broker_fallback, fetch.brokerUrl))
-            }
-            val candidates = relaySelector.orderedCandidates(relayResponse.relays, relayResponse.serverInstant)
-            OpenRungStatusStore.appendLog(
-                getString(R.string.log_broker_returned, relayResponse.relays.size, candidates.size),
-            )
-            check(candidates.isNotEmpty()) { getString(R.string.error_no_usable_relay) }
-
-            val targetedCandidates = if (targetCountry != null) {
-                val countryName = CountryGeo.displayName(targetCountry) ?: targetCountry
-                OpenRungStatusStore.appendLog(getString(R.string.log_connecting_country, countryName))
-                failureStage = "relay_geo_filter"
-                filterByCountry(candidates, targetCountry).also {
-                    check(it.isNotEmpty()) { getString(R.string.error_no_relay_in_country, countryName) }
-                }
-            } else {
-                candidates
-            }
-
-            failureStage = "relay_connect"
-            val connectedRelay = connectFirstAvailable(targetedCandidates)
-            val relay = connectedRelay.relay
-            activeRelayId = relay.id
-            TelemetryManager.markConnected(relay.id)
-            OpenRungStatusStore.setStatus(
-                ConnectionStatus.CONNECTED,
-                relayLabel = null,
-                lastError = null,
-            )
-            updateNotification(getString(R.string.status_connected))
-            resolveRelayLocation(relay)
-            TelemetryManager.record(
-                event = "connection_succeeded",
-                relayId = relay.id,
-                measurements = mapOf(
-                    "broker_fetch_ms" to brokerFetchMs,
-                    "relay_tcp_ms" to connectedRelay.tcpLatencyMs,
-                    "tunnel_start_ms" to connectedRelay.tunnelStartMs,
-                    "internet_probe_ms" to connectedRelay.internetProbeMs,
-                    "relay_attempts" to connectedRelay.attempts.toLong(),
-                ),
-            )
-            runCatching { TelemetryManager.flush(AppConfig.TELEMETRY_BROKER_URL) }
-            startHeartbeatLoop()
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            cleanupActiveTunnel()
-            TelemetryManager.record(
-                event = "connection_failed",
-                attributes = mapOf(
-                    "failure_stage" to failureStage,
-                    "error_type" to error::class.java.simpleName,
-                ),
-            )
-            TelemetryManager.endSession("connection_failed")
-            runCatching { TelemetryManager.flush(AppConfig.TELEMETRY_BROKER_URL) }
-            OpenRungStatusStore.fail(error.message ?: getString(R.string.error_vpn_connection_failed))
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-        }
+    internal fun finish(id: Int) = Handler(Looper.getMainLooper()).post {
+        // Only remove the foreground notification if this command still owns the service.
+        if (id == lastStartId && stopSelfResult(id)) stopForeground(STOP_FOREGROUND_REMOVE)
     }
-
-    private suspend fun connectFirstAvailable(candidates: List<RelayDescriptor>): ConnectedRelay {
-        var lastError: Throwable? = null
-        for ((index, relay) in candidates.withIndex()) {
+    internal fun terminateAfterFailedTeardown() {
+        Handler(Looper.getMainLooper()).post {
             try {
-                OpenRungStatusStore.appendLog(
-                    getString(R.string.log_trying_relay, relay.id, relay.publicHost, relay.publicPort),
-                )
-                OpenRungStatusStore.appendLog(getString(R.string.log_checking_relay_reachability))
-                val tcpLatencyMs = try {
-                    RelayReachability.checkTcp(relay)
-                } catch (error: Throwable) {
-                    throw IllegalStateException(
-                        getString(R.string.error_relay_unreachable, relay.publicHost, relay.publicPort),
-                        error,
-                    )
-                }
-                val config = SingBoxConfiguration(relay = relay).encodedJsonString()
-                val proxyEngine = ProxyEngineFactory.create()
-                val tunnelStarted = SystemClock.elapsedRealtime()
-                proxyEngine.start(
-                    relay = relay,
-                    configJson = config,
-                    vpnService = this,
-                )
-                val tunnelStartMs = SystemClock.elapsedRealtime() - tunnelStarted
-                engine = proxyEngine
-                OpenRungStatusStore.appendLog(getString(R.string.log_verifying_internet))
-                val internetProbe = InternetProbe(applicationContext).verify()
-                OpenRungStatusStore.appendLog(
-                    getString(R.string.log_internet_verified, internetProbe.durationMs),
-                )
-                return ConnectedRelay(
-                    relay = relay,
-                    tcpLatencyMs = tcpLatencyMs,
-                    tunnelStartMs = tunnelStartMs,
-                    internetProbeMs = internetProbe.durationMs,
-                    attempts = index + 1,
-                )
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                lastError = error
-                TelemetryManager.record(
-                    event = "relay_attempt_failed",
-                    relayId = relay.id,
-                    attributes = mapOf("error_type" to error::class.java.simpleName),
-                    measurements = mapOf("attempt" to (index + 1).toLong()),
-                )
-                OpenRungStatusStore.appendLog(
-                    getString(
-                        R.string.log_relay_failed,
-                        relay.id,
-                        error.message ?: error::class.java.simpleName,
-                    ),
-                )
-                cleanupActiveTunnel()
-            }
-        }
-
-        throw IllegalStateException(
-            getString(
-                R.string.error_all_relays_failed,
-                lastError?.message ?: getString(R.string.error_unknown),
-            ),
-        )
-    }
-
-    /**
-     * Resolves each candidate relay's country via GeoIP (concurrently, deduped by host) and keeps
-     * only those in [countryCode]. Relays whose geo can't be resolved are excluded so a targeted
-     * connect never silently lands in the wrong country.
-     */
-    private suspend fun filterByCountry(
-        candidates: List<RelayDescriptor>,
-        countryCode: String,
-    ): List<RelayDescriptor> = coroutineScope {
-        val target = countryCode.trim().uppercase()
-        val countryByHost = candidates.map { it.publicHost }.distinct()
-            .map { host ->
-                async {
-                    host to runCatching { GeoIpClient().lookup(host).countryCode.trim().uppercase() }.getOrNull()
-                }
-            }
-            .awaitAll()
-            .toMap()
-        candidates.filter { countryByHost[it.publicHost] == target }
-    }
-
-    private fun disconnect() {
-        heartbeatJob?.cancel()
-        heartbeatJob = null
-        OpenRungStatusStore.setStatus(ConnectionStatus.DISCONNECTING)
-        connectJob?.cancel()
-        cleanupActiveTunnel()
-        activeRelayId?.let {
-            TelemetryManager.record("tunnel_stopped", relayId = it)
-        }
-        activeRelayId = null
-        TelemetryManager.endSession("disconnect")
-        serviceScope.launch {
-            runCatching { TelemetryManager.flush(AppConfig.TELEMETRY_BROKER_URL) }
-        }
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        OpenRungStatusStore.setStatus(ConnectionStatus.DISCONNECTED, relayLabel = null, lastError = null)
-        stopSelf()
-    }
-
-    /**
-     * Resolves the relay's geographic location off the main path and shows only that location
-     * (never the raw IP). The relay line stays hidden until resolved; on failure it falls back to
-     * a generic label. Guarded by [activeRelayId] so a late result can't overwrite a disconnect.
-     */
-    private fun resolveRelayLocation(relay: RelayDescriptor) {
-        serviceScope.launch {
-            val geo = runCatching { GeoIpClient().lookup(relay.publicHost) }.getOrNull()
-            val location = geo?.locationLabel()?.takeIf { it.isNotBlank() }
-                ?: getString(R.string.relay_location_unknown)
-            if (activeRelayId != relay.id) return@launch
-            OpenRungStatusStore.setRelayLabel(location)
-            updateNotification(getString(R.string.vpn_notification_connected, location))
-            geo?.let(::recordRecentNode)
-        }
-    }
-
-    /** Adds the connected relay's country to the main-screen "Recents" row (best-effort). */
-    private fun recordRecentNode(geo: ClientGeoInfo) {
-        val code = geo.countryCode.trim().uppercase()
-        if (code.isBlank()) return
-        val centroid = CountryGeo.centroid(code)
-        OpenRungStatusStore.recordRecent(
-            RecentNode(
-                countryCode = code,
-                label = geo.locationLabel().ifBlank { centroid?.name ?: code },
-                latitude = centroid?.latitude ?: geo.latitude,
-                longitude = centroid?.longitude ?: geo.longitude,
-            ),
-        )
-    }
-
-    private fun startHeartbeatLoop() {
-        heartbeatJob?.cancel()
-        heartbeatJob = serviceScope.launch {
-            while (isActive) {
-                runCatching { TelemetryManager.sendHeartbeat() }
-                delay(Random.nextLong(HEARTBEAT_MIN_DELAY_MS, HEARTBEAT_MAX_DELAY_MS + 1))
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf() // Cancel START_STICKY resurrection before killing both TUN fd owners.
+            } finally {
+                android.os.Process.killProcess(android.os.Process.myPid())
             }
         }
     }
-
-    private fun cleanupActiveTunnel() {
-        engine?.stop()
-        engine = null
-    }
-
-    private data class ConnectedRelay(
-        val relay: RelayDescriptor,
-        val tcpLatencyMs: Long,
-        val tunnelStartMs: Long,
-        val internetProbeMs: Long,
-        val attempts: Int,
+    internal fun reportFailure(message: String) { OpenRungStatusStore.fail(message); showStatus(ConnectionStatus.FAILED) }
+    internal fun showStatus(status: ConnectionStatus, location: String? = null) = updateNotification(
+        if (status == ConnectionStatus.CONNECTED) getString(R.string.vpn_notification_connected,
+            location ?: getString(R.string.relay_location_unknown)) else getString(status.labelResId),
     )
+    internal fun observe(changed: (EngineNetworkSnapshot) -> Unit) { closeObservation(); observer = EngineNetworkObserver(this, changed) }
+    internal fun closeObservation() { observer?.close(); observer = null }
+    internal fun networkSnapshot(): EngineNetworkSnapshot = observer?.current ?: EngineNetworkObserver.snapshot(this)
+    internal fun networkAttributes(): Map<String,String> = observer?.current?.attributes.orEmpty()
+    internal fun physicalNetwork(): Network? = observer?.current?.defaultNetwork
+    internal fun physicalInterface(): EnginePhysicalInterface? = observer?.current?.defaultInterface
+    internal fun newRun(telemetry: OpenRungRunTelemetry): AndroidEngineRun = AndroidEngineRun(this, telemetry) { runs.remove(it) }.also { runs.add(it) }
+    internal fun refreshRunInterfaces() { runs.forEach { it.refreshInterfaces() } }
+    internal fun settingsJSON(): String = buildJsonObject {
+        put("tunnel_ipv4_address", SingBoxConfiguration.DEFAULT_TUNNEL_IPV4_ADDRESS)
+        put("tunnel_ipv6_address", "fdfe:dcba:9876::1/126")
+        put("mtu", 1400); put("log_level", if (BuildConfig.DEBUG) "info" else "warn")
+        put("route_find_process", true)
+        putJsonArray("probe_domain_suffixes") { ProbeTargets.RULE_DOMAIN_SUFFIXES.forEach { add(it) } }
+        currentSplitTunnelRules()?.let { rules -> putJsonObject("split_tunnel") {
+            put("bypass_lan", rules.bypassLan)
+            putJsonArray("bypass_countries") { rules.bypassCountries.forEach { add(it) } }
+            putJsonArray("excluded_packages") { rules.excludedPackages.forEach { add(it) } }
+            put("rule_set_directory", rules.ruleSetDirectory)
+        } }
+    }.toString()
+    private val stagedRuleSetDirectory by lazy { stageRuleSetAssets() }
+
+    private fun currentSplitTunnelRules(): SplitTunnelRules? {
+        val config = SplitTunnelStore.read(applicationContext) ?: return null
+        if (!config.enabled) return null
+        val ruleSetDirectory = stagedRuleSetDirectory
+        // An automatic country selection is re-derived from the device's CURRENT time zone here,
+        // not taken from the stored snapshot. This method runs on every connect attempt including
+        // the recovery reconnects that follow a physical-network change, so a phone that
+        // auto-selected China in Shanghai stops bypassing geosite-cn as soon as it rebuilds in
+        // Berlin — even if the app has not been opened since, and even if the RN foreground
+        // re-check never got the chance to run or lost the race with an in-flight recovery.
+        val requestedCountries = config.resolvedBypassCountries()
+        // Normalize to the canonical ir,cn order and keep only countries whose BOTH .srs files
+        // made it to disk (the generator's contract).
+        val bypassCountries = SplitTunnelRules.SUPPORTED_COUNTRIES.filter { country ->
+            if (country !in requestedCountries) return@filter false
+            val staged = File(ruleSetDirectory, "geosite-$country.srs").isFile &&
+                File(ruleSetDirectory, "geoip-$country.srs").isFile
+            if (!staged) {
+                OpenRungStatusStore.appendLog(getString(R.string.log_split_ruleset_missing, country))
+            }
+            staged
+        }
+        // Drop packages that are no longer installed: VpnService.Builder.addDisallowedApplication
+        // throws NameNotFoundException for an unknown package, which would abort every connect
+        // attempt (fail-open violation). A stale entry degrades to full-tunnel for that app.
+        val excludedPackages = config.excludedPackages.filter { pkg ->
+            runCatching { packageManager.getApplicationInfo(pkg, 0) }.isSuccess
+        }
+        if (!config.bypassLan && bypassCountries.isEmpty() && excludedPackages.isEmpty()) {
+            // Nothing effective: pass null so the emitted configuration stays byte-identical.
+            return null
+        }
+        return SplitTunnelRules(
+            bypassLan = config.bypassLan,
+            bypassCountries = bypassCountries,
+            excludedPackages = excludedPackages,
+            ruleSetDirectory = ruleSetDirectory.absolutePath,
+        )
+    }
+
+    /**
+     * Copies the bundled .srs rule sets once per service owner, shared by all
+     * candidates and recovery attempts. A new owner refreshes assets after app updates.
+     * Each copy is best-effort; a missing file just drops that country above.
+     */
+    private fun stageRuleSetAssets(): File {
+        val directory = File(filesDir, "libbox/rulesets")
+        directory.mkdirs()
+        SplitTunnelRules.SUPPORTED_COUNTRIES.forEach { country ->
+            listOf("geosite-$country.srs", "geoip-$country.srs").forEach { name ->
+                val destination = File(directory, name)
+                val temp = File(directory, "$name.tmp")
+                val copied = runCatching {
+                    assets.open("rulesets/$name").use { input ->
+                        temp.outputStream().use(input::copyTo)
+                    }
+                }.isSuccess
+                if (copied) {
+                    // Only a fully-copied temp becomes the live file, so a mid-copy IO failure
+                    // (e.g. no disk space) can never leave a truncated .srs that passes the isFile
+                    // gate above and then aborts every connect (CONTRACT §1 fail-open).
+                    destination.delete()
+                    if (!temp.renameTo(destination)) temp.delete()
+                } else {
+                    // Discard the partial temp; any previously staged good copy is left intact.
+                    temp.delete()
+                }
+            }
+        }
+        return directory
+    }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -387,23 +200,34 @@ class OpenRungVpnService : VpnService() {
     companion object {
         private const val ACTION_CONNECT = "com.openrung.action.CONNECT"
         private const val ACTION_DISCONNECT = "com.openrung.action.DISCONNECT"
+        private const val ACTION_REAPPLY = "com.openrung.action.REAPPLY"
         private const val EXTRA_BROKER_URL = "broker_url"
         private const val EXTRA_TARGET_COUNTRY = "target_country"
+        private const val EXTRA_TARGET_RELAY_ID = "target_relay_id"
         private const val NOTIFICATION_CHANNEL_ID = "openrung_vpn"
         private const val NOTIFICATION_ID = 2001
-        internal const val HEARTBEAT_MIN_DELAY_MS = 50_000L
-        internal const val HEARTBEAT_MAX_DELAY_MS = 70_000L
 
-        fun connectIntent(context: Context, brokerUrl: String, targetCountry: String? = null): Intent =
+        fun connectIntent(
+            context: Context,
+            brokerUrl: String,
+            targetCountry: String? = null,
+            targetRelayId: String? = null,
+        ): Intent =
             Intent(context, OpenRungVpnService::class.java).apply {
                 action = ACTION_CONNECT
                 putExtra(EXTRA_BROKER_URL, brokerUrl)
                 targetCountry?.let { putExtra(EXTRA_TARGET_COUNTRY, it) }
+                targetRelayId?.let { putExtra(EXTRA_TARGET_RELAY_ID, it) }
             }
 
         fun disconnectIntent(context: Context): Intent =
             Intent(context, OpenRungVpnService::class.java).apply {
                 action = ACTION_DISCONNECT
+            }
+
+        fun reapplyIntent(context: Context): Intent =
+            Intent(context, OpenRungVpnService::class.java).apply {
+                action = ACTION_REAPPLY
             }
     }
 }

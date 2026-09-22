@@ -1,29 +1,51 @@
 /**
- * Home screen. The exit-node map IS the screen: it fills the entire viewport
- * (running underneath the translucent tab bar) and stays pannable/zoomable,
- * while an edge vignette keeps only the center crisp and dissolves the map
- * into the app background towards every edge. The chrome floats on top:
+ * Home screen. The exit-node map IS the screen by default: it fills the
+ * entire viewport (running underneath the translucent tab bar) and stays
+ * pannable/zoomable, while an edge vignette keeps only the center crisp and
+ * dissolves the map into the app background towards every edge. The chrome
+ * floats on top:
  *
  *  - header: OpenRung wordmark (with a blinking terminal cursor) + tagline on
  *    the left, the relay-directory status chip on the right;
+ *  - view toggle: a MAP/LIST segmented pill under the header switches the
+ *    directory presentation (persisted, store.homeViewMode). In list mode a
+ *    scrollable relay list fills the middle; the map stays mounted beneath it
+ *    so toggling back keeps the camera position;
+ *  - ocean telemetry: a map-space HUD (inside ExitNodeMap) anchored in the
+ *    Pacific directly east of Shibuya — just off the default phone view, one
+ *    eastward pan away — with network totals, link status/uptime, and the
+ *    last tunnel error;
  *  - bottom stack: recents pills + the glass connect card, anchored above the
  *    tab bar.
  *
  * All overlay containers use pointerEvents="box-none" so map gestures pass
  * through everywhere except the actual controls.
  */
-import React, { useCallback, useEffect, useRef } from 'react';
-import { Animated, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import { Animated, Linking, Platform, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ConnectCard } from '../components/ConnectCard';
 import { EdgeFade } from '../components/EdgeFade';
 import { ExitNodeMap } from '../components/ExitNodeMap';
 import { MapStatusChip } from '../components/MapStatusChip';
+import { OceanTelemetry } from '../components/OceanTelemetry';
 import { RecentsSection } from '../components/RecentsSection';
-import { useStrings } from '../i18n';
-import { refreshDirectory } from '../state/store';
-import { useVpnState } from '../state/useVpnState';
+import { RelayList } from '../components/RelayList';
+import { UpdateBanner } from '../components/UpdateBanner';
+import { ViewModeToggle } from '../components/ViewModeToggle';
+import { AppConfig } from '../config';
+import { resolveLanguage, useLanguage, useStrings } from '../i18n';
+import { pickLocalizedText } from '../model/updateStatus';
+import {
+  hydrateHomeViewMode,
+  refreshDirectory,
+  setHomeViewMode,
+  useAppSelector,
+  type AppState,
+} from '../state/store';
+import { dismissUpdateBanner, dismissUpdateNotice } from '../state/updateCheck';
+import { useVpnActions } from '../state/useVpnState';
 import { monoFont, palette, tokens } from '../theme';
 
 /** Terminal-prompt wordmark: "OpenRung" + blinking block cursor + tagline. */
@@ -55,14 +77,56 @@ function Wordmark(): React.JSX.Element {
   );
 }
 
+/**
+ * Everything the home screen renders EXCEPT `native.logLines`: log lines change far more often
+ * than anything here (each one used to re-render the whole map tree), and only the Debug screen
+ * shows them. `useAppSelector`'s shallow comparison skips those events entirely.
+ */
+function selectMainScreenState(current: AppState) {
+  return {
+    status: current.native.status,
+    relayLabel: current.native.relayLabel,
+    relayName: current.native.relayName,
+    relayClass: current.native.relayClass,
+    lastError: current.native.lastError,
+    recents: current.native.recents,
+    directoryStatus: current.directoryStatus,
+    availableRegions: current.availableRegions,
+    homeViewMode: current.homeViewMode,
+    connectedAtMs: current.connectedAtMs,
+    update: current.update,
+  };
+}
+
 export function MainScreen(): React.JSX.Element {
   const insets = useSafeAreaInsets();
-  const { state, isConnected, isWorking, disconnect, prepareAndConnect } = useVpnState();
-  const { native, directoryStatus, availableRegions } = state;
+  const s = useStrings();
+  const { languageTag } = useLanguage();
+  const { disconnect, prepareAndConnect } = useVpnActions();
+  const {
+    status,
+    relayLabel,
+    relayName,
+    relayClass,
+    lastError,
+    recents,
+    directoryStatus,
+    availableRegions,
+    homeViewMode,
+    connectedAtMs,
+    update,
+  } = useAppSelector(selectMainScreenState);
+  const isConnected = status === 'connected';
+  const isWorking =
+    status === 'preparing' || status === 'connecting' || status === 'disconnecting';
+  const isListMode = homeViewMode === 'list';
+  const locale = resolveLanguage(languageTag);
 
-  // Populate the exit-node map directory when the home screen is shown (no-op once loaded).
+  // Populate the exit-node map directory when the home screen is shown (no-op once loaded)
+  // and restore the persisted map/list presentation.
   useEffect(() => {
     refreshDirectory();
+    hydrateHomeViewMode();
   }, []);
 
   const onToggle = useCallback(() => {
@@ -71,7 +135,7 @@ export function MainScreen(): React.JSX.Element {
         // Failures surface through the mirrored native state / debug console.
       });
     } else {
-      // null target country = let the broker pick any volunteer.
+      // null target country = let the broker pick any relay.
       prepareAndConnect(null).catch(() => {
         // Same: connect failures are reported via openrungStateChanged events.
       });
@@ -88,14 +152,68 @@ export function MainScreen(): React.JSX.Element {
     [prepareAndConnect],
   );
 
+  const onConnectRelay = useCallback(
+    (relayId: string, countryCode: string) => {
+      // Picked from an expanded multi-relay location in the list: pin that exact relay.
+      prepareAndConnect(countryCode, relayId).catch(() => {
+        // Reported via events.
+      });
+    },
+    [prepareAndConnect],
+  );
+
   const onRetryDirectory = useCallback(() => {
     refreshDirectory(true);
   }, []);
 
+  // Recents pin an exact relay, so a pill whose relay has left the broker's list would fail the
+  // connect outright. Hand RecentsSection the ids the directory currently knows so it can drop
+  // those pills — and null while the directory is unloaded/failed, where absence proves nothing
+  // and hiding would empty the row exactly when the network is least reachable.
+  const liveRelayIds = useMemo(
+    () =>
+      directoryStatus === 'loaded'
+        ? new Set(availableRegions.flatMap(region => region.relays.map(relay => relay.id)))
+        : null,
+    [directoryStatus, availableRegions],
+  );
+
+  const onOpenUpdate = useCallback(() => {
+    // Pinned destination only — never a manifest-supplied URL (see AppConfig.UPDATE_URL_ANDROID).
+    const url = Platform.OS === 'ios' ? AppConfig.TESTFLIGHT_URL : AppConfig.UPDATE_URL_ANDROID;
+    Linking.openURL(url).catch(() => {
+      // Best-effort: ignore devices without a browser handler.
+    });
+  }, []);
+
+  const notice = update.notice;
+  const onOpenNoticeUrl = useCallback(() => {
+    if (notice?.url != null) {
+      Linking.openURL(notice.url).catch(() => {
+        // Best-effort.
+      });
+    }
+  }, [notice]);
+
   return (
     <View style={styles.root}>
-      <View style={StyleSheet.absoluteFill}>
-        <ExitNodeMap regions={availableRegions} onRegionPress={onConnectRegion} />
+      <View
+        style={StyleSheet.absoluteFill}
+        // Hidden from assistive tech while the list covers it (iOS / Android).
+        accessibilityElementsHidden={isListMode}
+        importantForAccessibility={isListMode ? 'no-hide-descendants' : 'auto'}
+      >
+        <ExitNodeMap regions={availableRegions} onRegionPress={onConnectRegion}>
+          <OceanTelemetry
+            regions={availableRegions}
+            directoryStatus={directoryStatus}
+            status={status}
+            relayLabel={relayLabel}
+            relayName={relayName}
+            lastError={lastError}
+            connectedAtMs={connectedAtMs}
+          />
+        </ExitNodeMap>
       </View>
       <EdgeFade />
 
@@ -120,13 +238,52 @@ export function MainScreen(): React.JSX.Element {
           />
         </View>
 
-        <View style={styles.spacer} pointerEvents="none" />
+        {update.tier === 'notify' && update.latestVersion != null ? (
+          <UpdateBanner
+            style={styles.updateBanner}
+            title={s.updateBannerTitle}
+            body={s.updateBannerBody(update.latestVersion)}
+            primaryLabel={s.updateActionNow}
+            onPrimary={onOpenUpdate}
+            dismissLabel={s.updateActionLater}
+            onDismiss={dismissUpdateBanner}
+          />
+        ) : notice != null ? (
+          // Broadcast notice (verified manifests only; one card at a time — the update banner
+          // outranks it, and the notice returns once the banner is dismissed or acted on).
+          <UpdateBanner
+            style={styles.updateBanner}
+            level={notice.level}
+            title={pickLocalizedText(notice.title, locale)}
+            body={pickLocalizedText(notice.body, locale)}
+            primaryLabel={notice.url != null ? s.noticeLearnMore : undefined}
+            onPrimary={notice.url != null ? onOpenNoticeUrl : undefined}
+            dismissLabel={s.noticeDismiss}
+            onDismiss={() => dismissUpdateNotice(notice.id)}
+          />
+        ) : null}
+
+        <ViewModeToggle mode={homeViewMode} onChange={setHomeViewMode} style={styles.viewToggle} />
+
+        {isListMode ? (
+          <RelayList
+            regions={availableRegions}
+            directoryStatus={directoryStatus}
+            onRelayPress={onConnectRelay}
+            onRetry={onRetryDirectory}
+            refreshing={directoryStatus === 'loading'}
+            style={styles.list}
+          />
+        ) : (
+          <View style={styles.spacer} pointerEvents="none" />
+        )}
 
         <View style={styles.bottomStack} pointerEvents="box-none">
-          <RecentsSection recents={native.recents} />
+          <RecentsSection recents={recents} liveRelayIds={liveRelayIds} onPress={onConnectRelay} />
           <ConnectCard
-            status={native.status}
-            relayLabel={native.relayLabel}
+            status={status}
+            relayName={relayName}
+            relayClass={relayClass}
             isConnected={isConnected}
             isWorking={isWorking}
             onToggle={onToggle}
@@ -186,8 +343,18 @@ const styles = StyleSheet.create({
     fontSize: 11,
     letterSpacing: 1.2,
   },
+  updateBanner: {
+    marginTop: 14,
+  },
+  viewToggle: {
+    marginTop: 14,
+  },
   spacer: {
     flex: 1,
+  },
+  list: {
+    flex: 1,
+    marginVertical: 14,
   },
   bottomStack: {
     gap: 14,

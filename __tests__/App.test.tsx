@@ -29,6 +29,7 @@ jest.mock('@maplibre/maplibre-react-native', () => {
     Camera: stub('MapLibreCamera'),
     GeoJSONSource: stub('MapLibreGeoJSONSource'),
     Layer: stub('MapLibreLayer'),
+    Marker: stub('MapLibreMarker'),
   };
 });
 
@@ -114,10 +115,45 @@ jest.mock('react-native-safe-area-context', () => {
   };
 });
 
+// Stand-in for the native TabView: renders the active route's scene like the
+// real tab controller would (Jest runs as Platform.OS === 'ios').
+jest.mock('react-native-bottom-tabs', () => {
+  const ReactActual = require('react');
+  const { View } = require('react-native');
+  const TabView = ({
+    navigationState,
+    renderScene,
+  }: {
+    navigationState: { index: number; routes: { key: string }[] };
+    renderScene: (props: { route: { key: string }; jumpTo: (key: string) => void }) => React.ReactNode;
+  }) =>
+    ReactActual.createElement(
+      View,
+      null,
+      renderScene({ route: navigationState.routes[navigationState.index], jumpTo: () => {} }),
+    );
+  return { __esModule: true, default: TabView };
+});
+
+// Broker operations are a mandatory native seam in production. App rendering does not need a
+// broker result, so reject deterministically instead of depending on a native binary or network.
+jest.mock('../src/native/OpenRungBroker', () => {
+  const actual = jest.requireActual('../src/native/OpenRungBroker');
+  const unavailable = () =>
+    Promise.reject(new actual.OpenRungBrokerError('unavailable', 'native test host'));
+  return {
+    ...actual,
+    firstReachable: jest.fn(unavailable),
+    fetchManifestCandidate: jest.fn(unavailable),
+    runSpeedTest: jest.fn(unavailable),
+    sendTelemetryBatchJSON: jest.fn(unavailable),
+  };
+});
+
 import App from '../App';
 
-// Keep the directory refresh (broker fetch) off the real network: reject fast so
-// the store settles to 'failed' within the test instead of after teardown.
+// GitHub's redirecting release asset is the sole manifest path intentionally left on JS fetch.
+// Reject it fast so all mount-time background work settles without touching the network.
 beforeAll(() => {
   (globalThis as { fetch?: unknown }).fetch = jest.fn(async () => {
     throw new Error('network disabled in tests');
@@ -126,16 +162,21 @@ beforeAll(() => {
 
 test('renders correctly', async () => {
   let tree: ReactTestRenderer.ReactTestRenderer | undefined;
-  await ReactTestRenderer.act(async () => {
-    tree = ReactTestRenderer.create(<App />);
-  });
-  // Let mount-time async work settle inside act: native getState() seed,
-  // language hydration, and the (stubbed, rejecting) directory load.
-  await ReactTestRenderer.act(async () => {
-    await Promise.resolve();
-  });
-  // Unmount so nothing can schedule React updates after the test ends.
-  await ReactTestRenderer.act(async () => {
-    tree?.unmount();
-  });
+  try {
+    await ReactTestRenderer.act(async () => {
+      tree = ReactTestRenderer.create(<App />);
+    });
+    // Let the native state seed, directory rejection, language hydration, and sequential
+    // manifest candidates settle inside act. There is no discovery stagger anymore.
+    await ReactTestRenderer.act(async () => {
+      for (let i = 0; i < 8; i++) {
+        await Promise.resolve();
+      }
+    });
+  } finally {
+    // Unmount so component timers cannot schedule updates after the test ends.
+    await ReactTestRenderer.act(async () => {
+      tree?.unmount();
+    });
+  }
 });

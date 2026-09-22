@@ -5,12 +5,14 @@
 
 export const RelayConstants = {
   PROTOCOL_VLESS_REALITY_VISION: 'vless-reality-vision',
+  PROTOCOL_HYSTERIA2: 'hysteria2',
   FLOW_VISION: 'xtls-rprx-vision',
   EXIT_MODE_DIRECT: 'direct',
 } as const;
 
 export interface RelayDescriptor {
   id: string;
+  label?: string; // friendly relay name (operator-supplied or generated); absent on older brokers
   public_host: string;
   public_port: number;
   protocol: string;
@@ -22,20 +24,52 @@ export interface RelayDescriptor {
   exit_mode: string;
   max_sessions: number;
   max_mbps: number;
+  // Relay class: 'foundation' (Foundation-operated) or 'volunteer'. Absent on older
+  // brokers — treat absence (or any unknown value) as 'volunteer', like the native decoders.
+  node_class?: string;
+  // Legacy broker wire name; this reports the software version for every relay class.
   volunteer_version: string;
   registered_at: string; // ISO instant
   last_heartbeat_at: string;
   expires_at: string;
+  // Broker-served exit location (docs/api.md "List Relays"), city-level accurate at best.
+  // All five are absent until the broker's geo lookup succeeds — older brokers never send
+  // them. For tunnel (CGNAT) relays this is where traffic actually exits, which is NOT
+  // public_host (the relay hub) — never geolocate public_host client-side.
+  city?: string;
+  country?: string;
+  country_code?: string; // ISO 3166-1 alpha-2, uppercase
+  latitude?: number; // WGS84
+  longitude?: number;
 }
 
 export interface RelayListResponse {
   count: number;
   server_time: string;
   relays: RelayDescriptor[];
+  // Relay-list signing fields (SPEC v1 §2.2), absent on pre-signing brokers. They live INSIDE the
+  // signed body (never in headers) so an attacker cannot rewrite them. Native brokerapi verifies
+  // the Ed25519 signature and freshness over the raw body before this projected snapshot reaches
+  // TypeScript; brokerClient only decodes the already-verified directory fields.
+  not_after?: string; // RFC3339 freshness bound: server_time + 30 min on the API channel
+  key_id?: string; // advisory id of the signing key (first 8 bytes of SHA-256 over the raw pubkey)
+  channel?: string; // 'api' or 'mirror' — binds the body to the channel it was fetched from
+  limit?: number; // API channel only: echo of the effective request limit
 }
 
-export interface ErrorResponse {
-  error?: string;
+/**
+ * The relay class a client should act on. Only the exact literal 'foundation' is the foundation
+ * class; an absent, unrecognized, or differently-cased value is 'volunteer'. The strictness is
+ * load-bearing rather than incidental — the foundation class gates the WSS transport, so a value
+ * that merely resembles 'foundation' must never be read as it, and a future class name must
+ * degrade to the less-privileged side instead of being rejected.
+ *
+ * Keep in sync with the Kotlin `RelayDescriptor.normalizedNodeClass()`, the Swift
+ * `RelayDescriptor.normalizedNodeClass()`, and Go's `brokerapi.EffectiveNodeClass`. The shared
+ * contract vectors in testdata/contract/relay_decode.json pin all four against the same rows.
+ */
+export function effectiveNodeClass(nodeClass: string | undefined): 'foundation' | 'volunteer' {
+  return nodeClass === 'foundation' ? 'foundation' : 'volunteer';
 }
 
 function isNotBlank(value: string): boolean {
@@ -53,7 +87,7 @@ export function isUsable(relay: RelayDescriptor, nowMs: number): boolean {
     return false;
   }
   return (
-    relay.protocol === RelayConstants.PROTOCOL_VLESS_REALITY_VISION &&
+    (relay.protocol === RelayConstants.PROTOCOL_VLESS_REALITY_VISION || relay.protocol === RelayConstants.PROTOCOL_HYSTERIA2) &&
     relay.flow === RelayConstants.FLOW_VISION &&
     relay.exit_mode === RelayConstants.EXIT_MODE_DIRECT &&
     expiresMs > nowMs &&
@@ -79,8 +113,11 @@ export function serverTimeMs(response: RelayListResponse): number {
 }
 
 /**
- * `RelaySelector.orderedCandidates`: no client-side scoring — filter to usable relays preserving
- * broker order. Freshness is judged against broker server time, not the device clock.
+ * `RelaySelector.orderedCandidates`: score-free filter to usable relays preserving broker order.
+ * Freshness is judged against broker server time, not the device clock. (The native connect path
+ * may afterwards reorder — never shrink — the ladder by this client's measured TCP latency; see
+ * `RelayRanker` on Android/iOS. That is a separate, fail-open stage: the filter itself stays
+ * score-free.)
  */
 export function orderedCandidates(relays: RelayDescriptor[], nowMs: number): RelayDescriptor[] {
   return relays.filter(relay => isUsable(relay, nowMs));

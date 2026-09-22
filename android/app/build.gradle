@@ -3,62 +3,21 @@ apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "org.jetbrains.kotlin.plugin.serialization"
 apply plugin: "com.facebook.react"
 
-/**
- * This is the configuration block to customize your React Native Android app.
- * By default you don't need to apply any configuration, just uncomment the lines you need.
- */
+// Test JNI artifacts have a separate output tree, so switching their AAR or
+// application ID cannot reuse production packaging's incremental state.
+if (project.hasProperty('openrungEngineContractAar')) {
+    layout.buildDirectory = file("$projectDir/build-engine-contract")
+}
+
 react {
-    /* Folders */
-    //   The root of your project, i.e. where "package.json" lives. Default is '../..'
-    // root = file("../../")
-    //   The folder where the react-native NPM package is. Default is ../../node_modules/react-native
-    // reactNativeDir = file("../../node_modules/react-native")
-    //   The folder where the react-native Codegen package is. Default is ../../node_modules/@react-native/codegen
-    // codegenDir = file("../../node_modules/@react-native/codegen")
-    //   The cli.js file which is the React Native CLI entrypoint. Default is ../../node_modules/react-native/cli.js
-    // cliFile = file("../../node_modules/react-native/cli.js")
-
-    /* Variants */
-    //   The list of variants to that are debuggable. For those we're going to
-    //   skip the bundling of the JS bundle and the assets. Default is "debug", "debugOptimized".
-    //   If you add flavors like lite, prod, etc. you'll have to list your debuggableVariants.
-    // debuggableVariants = ["liteDebug", "liteDebugOptimized", "prodDebug", "prodDebugOptimized"]
-
-    /* Bundling */
-    //   A list containing the node command and its flags. Default is just 'node'.
-    // nodeExecutableAndArgs = ["node"]
-    //
-    //   The command to run when bundling. By default is 'bundle'
-    // bundleCommand = "ram-bundle"
-    //
-    //   The path to the CLI configuration file. Default is empty.
-    // bundleConfig = file(../rn-cli.config.js)
-    //
-    //   The name of the generated asset file containing your JS bundle
-    // bundleAssetName = "MyApplication.android.bundle"
-    //
-    //   The entry file for bundle generation. Default is 'index.android.js' or 'index.js'
-    // entryFile = file("../js/MyApplication.android.js")
-    //
-    //   A list of extra flags to pass to the 'bundle' commands.
-    //   See https://github.com/react-native-community/cli/blob/main/docs/commands.md#bundle
-    // extraPackagerArgs = []
-
-    /* Hermes Commands */
-    //   The hermes compiler command to run. By default it is 'hermesc'
-    // hermesCommand = "$rootDir/my-custom-hermesc/bin/hermesc"
-    //
-    //   The list of flags to pass to the Hermes compiler. By default is "-O", "-output-source-map"
-    // hermesFlags = ["-O", "-output-source-map"]
-
-    /* Autolinking */
     autolinkLibrariesWithApp()
 }
 
 /**
- * Set this to true to Run Proguard on Release builds to minify the Java bytecode.
+ * R8 shrinking/optimization for release builds. Keep rules for the reflective surfaces
+ * (libbox JNI bindings, kotlinx.serialization models) live in proguard-rules.pro.
  */
-def enableProguardInReleaseBuilds = false
+def enableProguardInReleaseBuilds = true
 
 /**
  * The preferred build flavor of JavaScriptCore (JSC)
@@ -73,6 +32,11 @@ def enableProguardInReleaseBuilds = false
  */
 def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
 
+// Single source of truth for the app version string: package.json at the repo root.
+// versionName derives from it so it can't drift (scripts/check-versions.mjs enforces this).
+// versionCode stays a manually-bumped build number — it's a separate, monotonic integer.
+def appVersionName = new groovy.json.JsonSlurper().parse(file("$rootDir/../package.json")).version
+
 android {
     ndkVersion rootProject.ext.ndkVersion
     buildToolsVersion rootProject.ext.buildToolsVersion
@@ -85,8 +49,9 @@ android {
         applicationId "com.openrung.mobile"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0.0"
+        versionCode 15
+        versionName appVersionName
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
     signingConfigs {
         debug {
@@ -95,18 +60,142 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        // Play upload key. The keystore is git-ignored; credentials live in
+        // ~/.gradle/gradle.properties (OPENRUNG_UPLOAD_*). When absent, release
+        // builds fail (see the buildTypes.release block and the taskGraph guard
+        // below) rather than silently signing with the committed, publicly-known
+        // debug key.
+        if (project.hasProperty('OPENRUNG_UPLOAD_STORE_FILE')) {
+            release {
+                storeFile file(OPENRUNG_UPLOAD_STORE_FILE)
+                storePassword OPENRUNG_UPLOAD_STORE_PASSWORD
+                keyAlias OPENRUNG_UPLOAD_KEY_ALIAS
+                keyPassword OPENRUNG_UPLOAD_KEY_PASSWORD
+            }
+        }
     }
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
+            if (project.hasProperty('openrungEngineContractAar')) {
+                applicationIdSuffix ".enginecontract"
+            }
         }
+        // Note: the release signingConfig is chosen fail-closed just below; the
+        // taskGraph guard after this android { } block aborts a keyless release build.
         release {
-            // Caution! In production, you need to generate your own keystore file.
-            // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
+            // Fail-closed signing. With the real upload key present we sign properly.
+            // Without it we must NOT fall back to the committed debug key: that key's
+            // private material and password are public, so a release APK signed with it
+            // is indistinguishable from a genuine build and anyone could forge "updates"
+            // for this VPN app. A release build without the key fails (enforced by the
+            // taskGraph guard below), unless a developer knowingly opts in to a throwaway
+            // debug-signed local build with -PopenrungAllowDebugSignedRelease.
+            if (project.hasProperty('OPENRUNG_UPLOAD_STORE_FILE')) {
+                signingConfig signingConfigs.release
+            } else if (project.hasProperty('openrungAllowDebugSignedRelease')) {
+                signingConfig signingConfigs.debug
+            }
             minifyEnabled enableProguardInReleaseBuilds
+            shrinkResources enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
+            // App-size trim: the RELEASE APK ships arm64-v8a ONLY (see the androidComponents
+            // block after android { } and RELEASE.md §4). Broker telemetry showed ~0
+            // genuinely 32-bit devices — every device is API >= 26 (minSdk) and arm64 — so
+            // armeabi-v7a is dropped too. It takes two levers because non-arm64 .so arrive by
+            // two paths: the packaging exclude drops the AAR-prebuilt ones (libbox, maplibre),
+            // and the release build passes -PreactNativeArchitectures=arm64-v8a to keep React
+            // Native's own prefab/Hermes libs arm64-only. ndk.abiFilters here does neither (it
+            // unions with reactNativeArchitectures and ignores prebuilt AAR .so).
         }
+    }
+
+    testOptions {
+        unitTests {
+            // FailureClassifierErrnoTest runs under Robolectric, which needs the merged
+            // Android resources available to the JVM unit-test classpath.
+            includeAndroidResources = true
+            // The cross-repo contract vectors live at the repo root, outside this module.
+            // Passing the directory explicitly keeps the suites off a relative path that
+            // depends on whichever working directory Gradle happens to use.
+            all {
+                it.systemProperty 'openrung.contractVectors', "${rootDir}/../testdata/contract"
+            }
+        }
+    }
+
+    sourceSets {
+        if (project.hasProperty('openrungEngineContractAar')) {
+            androidTest.java.srcDirs += 'src/engineContractAndroidTest/java'
+            androidTest.assets.srcDirs += "${rootDir}/../testdata/contract"
+        }
+        main {
+            // Split-tunneling rule sets ride along as generated assets (copyOpenRungRuleSets
+            // below) so the committed source tree carries them once, at rulesets/dist.
+            assets.srcDirs += "$buildDir/generated/openrungRuleSets"
+        }
+    }
+}
+
+// Bundles the committed split-tunneling rule sets (provenance: rulesets/README.md) as APK assets
+// at rulesets/<name>.srs. OpenRungVpnService stages them into filesDir on every connect; a
+// missing asset just drops that country's bypass (fail-open, docs/CONTRACT.md §1).
+tasks.register("copyOpenRungRuleSets", Copy) {
+    from "$rootDir/../rulesets/dist"
+    include "*.srs"
+    into "$buildDir/generated/openrungRuleSets/rulesets"
+}
+preBuild.dependsOn "copyOpenRungRuleSets"
+
+// App-size trim (lever 1 of 2): drop every non-arm64 slice of AAR-PREBUILT native libs
+// (the libbox AAR's jni/, the MapLibre SDK) from the RELEASE apk. arm64-v8a covers every
+// real Android phone this app can install on (minSdk 26 / Android 8.0, 2017 — the 32-bit
+// era predates that; broker telemetry confirmed ~0 genuinely 32-bit devices). armeabi-v7a
+// is 32-bit-only legacy hardware; x86/x86_64 are emulator-only. Shipping any of them to
+// every direct-download user (this app is not on Play — no per-device split delivery) is
+// dead weight. Scoped to the release variant, so debug keeps all four ABIs (from
+// reactNativeArchitectures) and any emulator still runs the engine. Stays ONE monolithic
+// base.apk (no splitSourceDirs), so offline APK sharing still accepts it (see
+// share/InstalledApkShare.kt, RELEASE.md §4).
+//
+// This exclude only reaches libs that flow through jniLibs merging. React Native's own
+// prefab/Hermes cores (libreactnative.so, libhermesvm.so, libjsi.so, libfbjni.so,
+// libc++_shared.so) bypass it — those are lever 2: the release build passes
+// -PreactNativeArchitectures=arm64-v8a so RN never produces their non-arm64 slices (wired
+// into .github/workflows/release.yml; see RELEASE.md §2). ndk.abiFilters was tried and
+// does neither reliably.
+androidComponents {
+    onVariants(selector().withBuildType("release")) { variant ->
+        variant.packaging.jniLibs.excludes.add("**/armeabi-v7a/**")
+        variant.packaging.jniLibs.excludes.add("**/x86/**")
+        variant.packaging.jniLibs.excludes.add("**/x86_64/**")
+    }
+}
+
+// Refuse to *assemble* a release without a real signing key rather than silently
+// producing a debug-signed (forgeable) "release". Runs only when a release output task
+// for this module is actually scheduled, so debug builds and `./gradlew tasks` are
+// unaffected. Opt out for a throwaway local build with -PopenrungAllowDebugSignedRelease.
+gradle.taskGraph.whenReady { graph ->
+    if (project.hasProperty('openrungEngineContractAar') && graph.allTasks.any {
+        it.project == project && it.name.toLowerCase().contains('release')
+    }) {
+        throw new GradleException("The engine contract AAR contains test seams and cannot build a release")
+    }
+    boolean assemblingRelease = graph.allTasks.any { task ->
+        task.project == project && task.name ==~ /(?i)(assemble|bundle|package).*Release/
+    }
+    boolean hasUploadKey = project.hasProperty('OPENRUNG_UPLOAD_STORE_FILE')
+    boolean allowDebugSigned = project.hasProperty('openrungAllowDebugSignedRelease')
+    if (assemblingRelease && !hasUploadKey && !allowDebugSigned) {
+        throw new GradleException(
+                "OpenRung release build has no signing key. Set OPENRUNG_UPLOAD_* in " +
+                "~/.gradle/gradle.properties to sign with the real upload key, or pass " +
+                "-PopenrungAllowDebugSignedRelease for a throwaway debug-signed local build " +
+                "(that APK is signed with a public key and must NEVER be distributed).")
+    } else if (assemblingRelease && !hasUploadKey && allowDebugSigned) {
+        logger.warn("OpenRung: signing the RELEASE build with the PUBLIC debug key " +
+                "(-PopenrungAllowDebugSignedRelease set). This APK is NOT distributable.")
     }
 }
 
@@ -114,11 +203,10 @@ dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
 
-    // vpn/ProxyEngine.kt compiles directly against the libbox AAR (io.nekohasekai.libbox.*).
-    // The AAR is git-ignored and copied in locally; the dependency is conditional like the
-    // production app's, so a checkout without libs/libbox.aar fails only when compiling the
-    // vpn source set (ProxyEngineFactory's StubProxyEngine covers runtime absence).
-    def libboxAar = file("libs/libbox.aar")
+    // The Android service links the generated libbox engine/host interfaces directly.
+    // CI rebuilds the ignored release AAR; the isolated JNI vector runner supplies
+    // a test-only AAR under an explicit, release-forbidden Gradle property.
+    def libboxAar = file(project.findProperty('openrungEngineContractAar') ?: "libs/libbox.aar")
     if (libboxAar.exists()) {
         implementation(files(libboxAar))
     }
@@ -132,4 +220,15 @@ dependencies {
     } else {
         implementation jscFlavor
     }
+
+    // Unit tests for the vpn failure classifier. Robolectric supplies real android.system
+    // OsConstants values and a working ErrnoException so the errno-based classification
+    // (connection_refused/reset/network_unreachable/…) can be exercised on the JVM — a plain
+    // stubbed android.jar reports every OsConstants value as 0.
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.14.1")
+    // Deterministic virtual-time control for coroutine retry, recovery, and lifecycle tests.
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }

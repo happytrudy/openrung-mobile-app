@@ -15,17 +15,11 @@ enum class ConnectionStatus(@StringRes val labelResId: Int) {
 
 data class OpenRungUiState(
     val status: ConnectionStatus = ConnectionStatus.DISCONNECTED,
-    val brokerUrl: String = "",
     val relayLabel: String? = null,
+    val relayName: String? = null,
+    /** Node class of the connected relay ("foundation" or "volunteer"); null unless CONNECTED. */
+    val relayClass: String? = null,
     val lastError: String? = null,
     val logLines: List<String> = emptyList(),
     val recentRegions: List<RecentNode> = emptyList(),
-) {
-    val isWorking: Boolean
-        get() = status == ConnectionStatus.PREPARING ||
-            status == ConnectionStatus.CONNECTING ||
-            status == ConnectionStatus.DISCONNECTING
-
-    val isConnected: Boolean
-        get() = status == ConnectionStatus.CONNECTED
-}
+)
