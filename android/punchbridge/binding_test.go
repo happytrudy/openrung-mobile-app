@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/openrung/openrung/punchcore"
+	"github.com/happytrudy/openrung/punchcore"
 	"github.com/sagernet/sing-box/experimental/libbox/internal/openrungpunch"
 )
 

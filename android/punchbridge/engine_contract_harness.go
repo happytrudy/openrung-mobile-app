@@ -14,11 +14,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/openrung/openrung/brokerapi"
-	"github.com/openrung/openrung/connectcore"
-	"github.com/openrung/openrung/connectcore/discovery"
-	"github.com/openrung/openrung/punchcore"
-	"github.com/openrung/openrung/wsscore"
+	"github.com/happytrudy/openrung/brokerapi"
+	"github.com/happytrudy/openrung/connectcore"
+	"github.com/happytrudy/openrung/connectcore/discovery"
+	"github.com/happytrudy/openrung/punchcore"
+	"github.com/happytrudy/openrung/wsscore"
 )
 
 // Test-only network/runtime seams. Never included in release artifacts.

@@ -12,8 +12,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/openrung/openrung/connectcore/client"
-	"github.com/openrung/openrung/connectcore/clienttelemetry"
+	"github.com/happytrudy/openrung/connectcore/client"
+	"github.com/happytrudy/openrung/connectcore/clienttelemetry"
 )
 
 // openRungFailureInput is one platform-described connect failure: the facts a

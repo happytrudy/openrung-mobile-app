@@ -8,7 +8,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/openrung/openrung/brokerapi"
+	"github.com/happytrudy/openrung/brokerapi"
 	"github.com/sagernet/sing-box/daemon"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/emptypb"

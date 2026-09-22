@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/openrung/openrung/brokerapi"
-	"github.com/openrung/openrung/connectcore/client"
+	"github.com/happytrudy/openrung/brokerapi"
+	"github.com/happytrudy/openrung/connectcore/client"
 )
 
 // openRungSingBoxInput is one platform-described sing-box build request: the

@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/openrung/openrung/brokerapi"
-	"github.com/openrung/openrung/connectcore"
-	"github.com/openrung/openrung/connectcore/clienttelemetry"
-	"github.com/openrung/openrung/wsscore"
+	"github.com/happytrudy/openrung/brokerapi"
+	"github.com/happytrudy/openrung/connectcore"
+	"github.com/happytrudy/openrung/connectcore/clienttelemetry"
+	"github.com/happytrudy/openrung/wsscore"
 	"github.com/sagernet/sing-box/daemon"
 	"google.golang.org/grpc/metadata"
 )

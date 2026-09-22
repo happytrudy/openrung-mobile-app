@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/openrung/openrung/brokerapi"
-	"github.com/openrung/openrung/connectcore"
-	"github.com/openrung/openrung/punchcore"
+	"github.com/happytrudy/openrung/brokerapi"
+	"github.com/happytrudy/openrung/connectcore"
+	"github.com/happytrudy/openrung/punchcore"
 	"github.com/sagernet/sing-box/experimental/libbox/internal/openrungpunch"
 )
 
