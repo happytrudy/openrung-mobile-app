@@ -16,14 +16,14 @@ enum AppConfig {
     /// Primary relay-discovery URL passed to brokerapi. The native Go client owns built-in
     /// candidates, override policy, racing, relay verification, and transport selection; Swift
     /// receives only the winning URL and a verified relay-list snapshot.
-    static let defaultBrokerURL = URL(string: "https://broker.openrung.org/")!
+    static let defaultBrokerURL = URL(string: "https://broker.dubu.host/")!
 
     /// Bootstrap native VPN telemetry / heartbeat target used until verified relay discovery
     /// selects a live broker front. The active telemetry session then follows that exact winner,
     /// so a client that reached discovery through fallback does not post diagnostics back to a
     /// blocked primary. React Native speed-test telemetry has its own TypeScript route. Never use
     /// a raw-IP HTTP endpoint: that would expose the user's pre-VPN IP, geo and stable client ID.
-    static let telemetryBrokerURL = URL(string: "https://broker.openrung.org/")!
+    static let telemetryBrokerURL = URL(string: "https://broker.dubu.host/")!
 
     /// Broker fronts retained for WSS-ticket ordering and other paths that have their own explicit
     /// policy. Native relay discovery no longer constructs candidates here: brokerapi owns its

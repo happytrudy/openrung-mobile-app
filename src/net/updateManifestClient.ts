@@ -25,7 +25,7 @@ ed.etc.sha512Sync = (...messages: Uint8Array[]) => sha512(ed.etc.concatBytes(...
  */
 
 const REQUEST_TIMEOUT_MS = 10_000;
-const DIRECT_MANIFEST_URL = 'https://broker.openrung.org/api/v1/app-manifest';
+const DIRECT_MANIFEST_URL = 'https://broker.dubu.host/api/v1/app-manifest';
 const CLOUDFRONT_MANIFEST_URL =
   'https://d2r7mdpyevvs1m.cloudfront.net/api/v1/app-manifest';
 const GITHUB_MANIFEST_URL =

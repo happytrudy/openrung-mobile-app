@@ -6,7 +6,7 @@ object AppConfig {
      * candidates, override policy, racing, relay verification, and transport selection; Kotlin
      * receives only the winning URL and a verified relay-list snapshot.
      */
-    const val DEFAULT_BROKER_URL = "https://broker.openrung.org/"
+    const val DEFAULT_BROKER_URL = "https://broker.dubu.host/"
 
     /**
      * Bootstrap telemetry / heartbeat target used until verified relay discovery selects a live
@@ -15,7 +15,7 @@ object AppConfig {
      * Never use a raw-IP HTTP endpoint: that would expose the user's pre-VPN IP, geo and stable
      * client ID in cleartext.
      */
-    const val TELEMETRY_BROKER_URL = "https://broker.openrung.org/"
+    const val TELEMETRY_BROKER_URL = "https://broker.dubu.host/"
 
     /**
      * Stable broker-front order retained for native WSS-ticket failover. Native relay discovery

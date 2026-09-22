@@ -12,13 +12,13 @@ export const AppConfig = {
    * Primary broker passed to the native brokerapi selector. Go owns the built-in candidates,
    * custom-override policy, staggered racing, relay verification, and transport selection.
    */
-  DEFAULT_BROKER_URL: 'https://broker.openrung.org/',
+  DEFAULT_BROKER_URL: 'https://broker.dubu.host/',
 
   /**
    * Native brokerapi target for the React Native speed test and its small telemetry batch.
    * General VPN telemetry remains owned by the Android VPN service and iOS PacketTunnel.
    */
-  TELEMETRY_BROKER_URL: 'https://broker.openrung.org/',
+  TELEMETRY_BROKER_URL: 'https://broker.dubu.host/',
 
   /**
    * Relay fetch used to populate the exit-node map directory. This is the broker's maximum
@@ -72,7 +72,7 @@ export const AppConfig = {
    * Ordered candidates for the in-app update manifest (docs/UPDATE_MANIFEST.md), tried
    * sequentially with a per-attempt timeout, fail-open: all-fail just means "no update UI".
    * The CloudFront and direct broker candidates use native brokerapi. CloudFront leads because the
-   * SNI-less front stays reachable where broker.openrung.org is blocked, mirroring brokerapi's
+   * The configured broker endpoint is used directly; brokerapi owns its
    * discovery order (@see brokerapi.DefaultBrokerURLs). The GitHub release asset is
    * the narrow redirecting JavaScript-fetch exception and remains last because github.com is
    * unreliable in several target regions.
@@ -84,7 +84,7 @@ export const AppConfig = {
    */
   UPDATE_MANIFEST_URLS: [
     'https://d2r7mdpyevvs1m.cloudfront.net/api/v1/app-manifest',
-    'https://broker.openrung.org/api/v1/app-manifest',
+    'https://broker.dubu.host/api/v1/app-manifest',
     'https://github.com/openrung/openrung-mobile-app/releases/latest/download/update-manifest.json',
   ],
 

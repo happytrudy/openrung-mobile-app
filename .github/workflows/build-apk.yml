@@ -5,7 +5,7 @@ on:
       broker_url:
         description: Broker URL used by the app
         required: false
-        default: https://broker.openrung.org/
+        default: https://broker.dubu.host/
       publish_release:
         description: Publish APK to the current GitHub release
         required: false
@@ -46,7 +46,7 @@ jobs:
         env:
           BROKER_URL: ${{ inputs.broker_url }}
         run: |
-          python3 -c 'import pathlib,sys; u=sys.argv[1].strip(); assert u.startswith("https://"), "broker_url must use https://"; [p.write_text(p.read_text().replace("https://broker.openrung.org/", u.rstrip("/")+"/")) for p in map(pathlib.Path, ("src/config.ts", "android/app/src/main/java/com/openrung/config/AppConfig.kt", "ios/Shared/AppConfig.swift"))]' "$BROKER_URL"
+          python3 -c 'import pathlib,sys; u=sys.argv[1].strip(); assert u.startswith("https://"), "broker_url must use https://"; [p.write_text(p.read_text().replace("https://broker.dubu.host/", u.rstrip("/")+"/")) for p in map(pathlib.Path, ("src/config.ts", "android/app/src/main/java/com/openrung/config/AppConfig.kt", "ios/Shared/AppConfig.swift"))]' "$BROKER_URL"
       - name: Prepare OpenRung fork source
         run: git clone --depth 1 https://github.com/happytrudy/openrung.git /tmp/openrung-core
       - name: Build libbox AAR with forked OpenRung core
