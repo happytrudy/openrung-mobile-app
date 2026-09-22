@@ -126,6 +126,10 @@ jobs:
       # Force NDK 29 for the libbox link. The runner pre-sets ANDROID_NDK_HOME to an older
       # NDK, which the script's ${VAR:-default} would otherwise keep — and that older lld
       # fails on libcronet.a with "unknown relocation".
+      - name: Resolve fork module checksums
+        if: steps.libbox.outputs.cache-hit != 'true'
+        working-directory: android/punchbridge
+        run: GOWORK=off GOFLAGS=-mod=mod go mod download
       - name: Build libbox.aar
         if: steps.libbox.outputs.cache-hit != 'true'
         run: |

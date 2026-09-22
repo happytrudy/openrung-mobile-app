@@ -324,6 +324,10 @@ done
   fi
 
   GOWORK=off go mod edit "${go_mod_edits[@]}"
+  # The fork uses a different module path from the historical upstream.
+  # Downloading with -mod=mod writes the fork's go.sum entries before the
+  # read-only gomobile/test steps below.
+  GOFLAGS=-mod=mod GOMODCACHE="$module_cache" GOWORK=off go mod download
   # Resolve all exact pins without `go mod tidy`, which would rewrite
   # unrelated sing-box requirements. go get also records the full module sums
   # required by gomobile's read-only build; any directory replaces above remain
