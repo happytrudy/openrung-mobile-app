@@ -36,12 +36,12 @@ punchcore_version="$(go mod edit -json "$punch_source/go.mod" | python3 -c '
 import json, sys
 data = json.load(sys.stdin)
 for require in data.get("Require") or []:
-    if require["Path"] == "github.com/happytrudy/openrung/punchcore":
+    if require["Path"] == "github.com/openrung/openrung/punchcore":
         print(require["Version"])
         break
 ')"
 if [ -z "$punchcore_version" ]; then
-  echo "error: $punch_source/go.mod has no require for github.com/happytrudy/openrung/punchcore" >&2
+  echo "error: $punch_source/go.mod has no require for github.com/openrung/openrung/punchcore" >&2
   exit 1
 fi
 
@@ -49,12 +49,12 @@ wsscore_version="$(go mod edit -json "$punch_source/go.mod" | python3 -c '
 import json, sys
 data = json.load(sys.stdin)
 for require in data.get("Require") or []:
-    if require["Path"] == "github.com/happytrudy/openrung/wsscore":
+    if require["Path"] == "github.com/openrung/openrung/wsscore":
         print(require["Version"])
         break
 ')"
 if [ -z "$wsscore_version" ]; then
-  echo "error: $punch_source/go.mod has no require for github.com/happytrudy/openrung/wsscore" >&2
+  echo "error: $punch_source/go.mod has no require for github.com/openrung/openrung/wsscore" >&2
   exit 1
 fi
 
@@ -62,12 +62,12 @@ brokerapi_version="$(go mod edit -json "$punch_source/go.mod" | python3 -c '
 import json, sys
 data = json.load(sys.stdin)
 for require in data.get("Require") or []:
-    if require["Path"] == "github.com/happytrudy/openrung/brokerapi":
+    if require["Path"] == "github.com/openrung/openrung/brokerapi":
         print(require["Version"])
         break
 ')"
 if [ -z "$brokerapi_version" ]; then
-  echo "error: $punch_source/go.mod has no require for github.com/happytrudy/openrung/brokerapi" >&2
+  echo "error: $punch_source/go.mod has no require for github.com/openrung/openrung/brokerapi" >&2
   exit 1
 fi
 
@@ -75,12 +75,12 @@ connectcore_version="$(go mod edit -json "$punch_source/go.mod" | python3 -c '
 import json, sys
 data = json.load(sys.stdin)
 for require in data.get("Require") or []:
-    if require["Path"] == "github.com/happytrudy/openrung/connectcore":
+    if require["Path"] == "github.com/openrung/openrung/connectcore":
         print(require["Version"])
         break
 ')"
 if [ -z "$connectcore_version" ]; then
-  echo "error: $punch_source/go.mod has no require for github.com/happytrudy/openrung/connectcore" >&2
+  echo "error: $punch_source/go.mod has no require for github.com/openrung/openrung/connectcore" >&2
   exit 1
 fi
 
@@ -108,19 +108,19 @@ if [ -n "${PUNCHCORE_SRC:-}" ] || [ -n "${WSSCORE_SRC:-}" ] || [ -n "${BROKERAPI
     echo "use $punch_source"
     if [ -n "${PUNCHCORE_SRC:-}" ]; then
       echo
-      echo "replace github.com/happytrudy/openrung/punchcore => $PUNCHCORE_SRC"
+      echo "replace github.com/openrung/openrung/punchcore => $PUNCHCORE_SRC"
     fi
     if [ -n "${WSSCORE_SRC:-}" ]; then
       echo
-      echo "replace github.com/happytrudy/openrung/wsscore => $WSSCORE_SRC"
+      echo "replace github.com/openrung/openrung/wsscore => $WSSCORE_SRC"
     fi
     if [ -n "${BROKERAPI_SRC:-}" ]; then
       echo
-      echo "replace github.com/happytrudy/openrung/brokerapi => $BROKERAPI_SRC"
+      echo "replace github.com/openrung/openrung/brokerapi => $BROKERAPI_SRC"
     fi
     if [ -n "${CONNECTCORE_SRC:-}" ]; then
       echo
-      echo "replace github.com/happytrudy/openrung/connectcore => $CONNECTCORE_SRC"
+      echo "replace github.com/openrung/openrung/connectcore => $CONNECTCORE_SRC"
     fi
   } > "$dev_workspace"
 fi
@@ -133,10 +133,10 @@ test_workspace="$work_dir/openrung-core-test.work"
   echo
   echo "use $punch_source"
   echo
-  echo "replace github.com/happytrudy/openrung/brokerapi => $core_source/brokerapi"
-  echo "replace github.com/happytrudy/openrung/connectcore => $core_source/connectcore"
-  echo "replace github.com/happytrudy/openrung/punchcore => $core_source/punchcore"
-  echo "replace github.com/happytrudy/openrung/wsscore => $core_source/wsscore"
+  echo "replace github.com/openrung/openrung/brokerapi => $core_source/brokerapi"
+  echo "replace github.com/openrung/openrung/connectcore => $core_source/connectcore"
+  echo "replace github.com/openrung/openrung/punchcore => $core_source/punchcore"
+  echo "replace github.com/openrung/openrung/wsscore => $core_source/wsscore"
 } > "$test_workspace"
 (
   cd "$punch_source"
@@ -298,33 +298,33 @@ done
 (
   cd "$work_dir/source"
   go_mod_edits=(
-    -require "github.com/happytrudy/openrung/brokerapi@$brokerapi_version"
-    -require "github.com/happytrudy/openrung/connectcore@$connectcore_version"
-    -require "github.com/happytrudy/openrung/punchcore@$punchcore_version"
-    -require "github.com/happytrudy/openrung/wsscore@$wsscore_version"
-    -replace "github.com/happytrudy/openrung/brokerapi=$core_source/brokerapi"
-    -replace "github.com/happytrudy/openrung/connectcore=$core_source/connectcore"
-    -replace "github.com/happytrudy/openrung/punchcore=$core_source/punchcore"
-    -replace "github.com/happytrudy/openrung/wsscore=$core_source/wsscore"
+    -require "github.com/openrung/openrung/brokerapi@$brokerapi_version"
+    -require "github.com/openrung/openrung/connectcore@$connectcore_version"
+    -require "github.com/openrung/openrung/punchcore@$punchcore_version"
+    -require "github.com/openrung/openrung/wsscore@$wsscore_version"
+    -replace "github.com/openrung/openrung/brokerapi=$core_source/brokerapi"
+    -replace "github.com/openrung/openrung/connectcore=$core_source/connectcore"
+    -replace "github.com/openrung/openrung/punchcore=$core_source/punchcore"
+    -replace "github.com/openrung/openrung/wsscore=$core_source/wsscore"
   )
   if [ -n "${BROKERAPI_SRC:-}" ]; then
     go_mod_edits+=(
-      -replace "github.com/happytrudy/openrung/brokerapi=$BROKERAPI_SRC"
+      -replace "github.com/openrung/openrung/brokerapi=$BROKERAPI_SRC"
     )
   fi
   if [ -n "${CONNECTCORE_SRC:-}" ]; then
     go_mod_edits+=(
-      -replace "github.com/happytrudy/openrung/connectcore=$CONNECTCORE_SRC"
+      -replace "github.com/openrung/openrung/connectcore=$CONNECTCORE_SRC"
     )
   fi
   if [ -n "${PUNCHCORE_SRC:-}" ]; then
     go_mod_edits+=(
-      -replace "github.com/happytrudy/openrung/punchcore=$PUNCHCORE_SRC"
+      -replace "github.com/openrung/openrung/punchcore=$PUNCHCORE_SRC"
     )
   fi
   if [ -n "${WSSCORE_SRC:-}" ]; then
     go_mod_edits+=(
-      -replace "github.com/happytrudy/openrung/wsscore=$WSSCORE_SRC"
+      -replace "github.com/openrung/openrung/wsscore=$WSSCORE_SRC"
     )
   fi
 
@@ -359,10 +359,10 @@ done
   # authoritative for development builds.
   GOFLAGS=-mod=mod GOMODCACHE="$module_cache" GOWORK=off \
     go get \
-      "github.com/happytrudy/openrung/brokerapi@$brokerapi_version" \
-      "github.com/happytrudy/openrung/connectcore@$connectcore_version" \
-      "github.com/happytrudy/openrung/punchcore@$punchcore_version" \
-      "github.com/happytrudy/openrung/wsscore@$wsscore_version"
+      "github.com/openrung/openrung/brokerapi@$brokerapi_version" \
+      "github.com/openrung/openrung/connectcore@$connectcore_version" \
+      "github.com/openrung/openrung/punchcore@$punchcore_version" \
+      "github.com/openrung/openrung/wsscore@$wsscore_version"
   # GOWORK=off so a developer go.work can never leak into the graft build.
   # Build one AAR with all four React Native release ABIs: armeabi-v7a,
   # arm64-v8a, x86, and x86_64. The previous arm64-only target was too narrow

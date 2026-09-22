@@ -20,7 +20,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/happytrudy/openrung/brokerapi"
+	"github.com/openrung/openrung/brokerapi"
 )
 
 const (

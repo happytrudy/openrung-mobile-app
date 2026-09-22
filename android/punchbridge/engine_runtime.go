@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/happytrudy/openrung/connectcore"
+	"github.com/openrung/openrung/connectcore"
 )
 
 // The service factory is Go-only. engine_libbox.go supplies libbox's concrete

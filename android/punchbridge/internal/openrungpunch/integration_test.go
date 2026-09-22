@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/happytrudy/openrung/punchcore"
+	"github.com/openrung/openrung/punchcore"
 	upstreamquic "github.com/quic-go/quic-go"
 )
 

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/happytrudy/openrung/punchcore"
+	"github.com/openrung/openrung/punchcore"
 )
 
 // Independent expectations from shipping NatPunchClient at mobile main 53e03d9.

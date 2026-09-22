@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/happytrudy/openrung/wsscore"
+	"github.com/openrung/openrung/wsscore"
 )
 
 const (

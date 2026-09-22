@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/happytrudy/openrung/connectcore"
-	"github.com/happytrudy/openrung/punchcore"
+	"github.com/openrung/openrung/connectcore"
+	"github.com/openrung/openrung/punchcore"
 )
 
 // Preserve Android's shipping coordinator trust boundary while connectcore owns

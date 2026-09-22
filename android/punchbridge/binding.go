@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/happytrudy/openrung/punchcore"
+	"github.com/openrung/openrung/punchcore"
 	"github.com/sagernet/sing-box/experimental/libbox/internal/openrungpunch"
 )
 

@@ -6,8 +6,8 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/happytrudy/openrung/brokerapi"
-	"github.com/happytrudy/openrung/connectcore/clienttelemetry"
+	"github.com/openrung/openrung/brokerapi"
+	"github.com/openrung/openrung/connectcore/clienttelemetry"
 )
 
 // OpenRungTelemetryOutbox is the shared on-disk telemetry outbox behind both

@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/happytrudy/openrung/brokerapi"
+	"github.com/openrung/openrung/brokerapi"
 )
 
 type testOpenRungBrokerClient struct {

@@ -1,6 +1,6 @@
 // Package openrungpunch is the sagernet-QUIC session, transport and bridge
 // layer of the OpenRung mobile NAT-punch client, over the shared protocol core
-// github.com/happytrudy/openrung/punchcore.
+// github.com/openrung/openrung/punchcore.
 package openrungpunch
 
 import (
@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/happytrudy/openrung/punchcore"
+	"github.com/openrung/openrung/punchcore"
 )
 
 const (

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/happytrudy/openrung/wsscore"
+	"github.com/openrung/openrung/wsscore"
 )
 
 const (
